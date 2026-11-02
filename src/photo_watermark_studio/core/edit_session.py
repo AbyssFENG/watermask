@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
-"""预览点击改文案/字号的临时会话。按照片路径分别保存；导出或退出时清除。"""
+"""按张保存的编辑覆盖。支持文案/字号与布局差分。"""
 from __future__ import annotations
 
 import json
 import tempfile
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from photo_watermark_studio.core.settings_store import FIELD_SCALE_KEYS, TEXT_KEYS
+from photo_watermark_studio.core.settings_store import FIELD_SCALE_KEYS, TEXT_KEYS, coerce_layout
 
 _EDITABLE_META = ("camera", "lens", "exif", "date", "gps")
+_DOC_KEYS = ("layout",)
 
 
 def session_dir() -> Path:
@@ -26,6 +28,7 @@ def empty_photo_overrides() -> dict[str, Any]:
         data[key] = ""
     for key in FIELD_SCALE_KEYS:
         data[key] = 1.0
+    data["layout"] = {}
     return data
 
 
@@ -41,6 +44,10 @@ def _coerce_photo_overrides(raw: dict[str, Any] | None) -> dict[str, Any]:
         except (TypeError, ValueError):
             value = 1.0
         data[key] = min(1.6, max(0.7, value))
+    if isinstance(raw.get("layout"), dict) and raw["layout"]:
+        data["layout"] = coerce_layout(raw["layout"])
+    else:
+        data["layout"] = {}
     return data
 
 
@@ -58,7 +65,6 @@ def merge_photo_overrides(
     photo_path: str | Path | None,
     photos: dict[str, dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    """把某张照片的临时覆盖合并进渲染选项。"""
     merged = dict(options)
     values = empty_photo_overrides()
     if isinstance(photos, dict):
@@ -69,12 +75,22 @@ def merge_photo_overrides(
         merged[item] = values.get(item, "")
     for item in FIELD_SCALE_KEYS:
         merged[item] = values.get(item, 1.0)
+    layout_override = values.get("layout") or {}
+    if layout_override:
+        base_layout = coerce_layout(merged.get("layout") if isinstance(merged.get("layout"), dict) else None)
+        base_layout.update({k: layout_override[k] for k in layout_override})
+        merged["layout"] = base_layout
+        for key in ("anchor", "margin_x", "margin_y", "offset_x", "offset_y", "bar_opacity", "corner_radius", "blur_radius"):
+            if key in base_layout:
+                merged[key] = base_layout[key]
+    elif isinstance(merged.get("layout"), dict):
+        for key in ("anchor", "margin_x", "margin_y", "offset_x", "offset_y", "bar_opacity", "corner_radius", "blur_radius"):
+            if key in merged["layout"]:
+                merged[key] = merged["layout"][key]
     return merged
 
 
 class EditSessionStore:
-    """按照片路径保存元数据文案/字号到临时 JSON。"""
-
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path) if path is not None else default_session_path()
         self._photos: dict[str, dict[str, Any]] = {}
@@ -88,10 +104,8 @@ class EditSessionStore:
             return {}
         photos: dict[str, dict[str, Any]] = {}
         if isinstance(raw, dict):
-            # 新格式：{"photos": {path: {...}}}
             source = raw.get("photos") if isinstance(raw.get("photos"), dict) else None
             if source is None and any(key in raw for key in TEXT_KEYS):
-                # 兼容旧的全局格式：整份当作“未绑定路径”的无效数据，直接丢弃。
                 source = {}
             if isinstance(source, dict):
                 for photo_path, values in source.items():
@@ -120,8 +134,17 @@ class EditSessionStore:
         except OSError:
             pass
 
+    def clear_photo(self, photo_path: str | Path | None) -> None:
+        key = normalize_photo_path(photo_path)
+        if key in self._photos:
+            self._photos.pop(key, None)
+            if self._photos:
+                self.save()
+            else:
+                self.clear()
+
     def snapshot_photos(self) -> dict[str, dict[str, Any]]:
-        return {key: dict(value) for key, value in self._photos.items()}
+        return {key: deepcopy(value) for key, value in self._photos.items()}
 
     def has_overrides(self, photo_path: str | Path | None = None) -> bool:
         if photo_path is None:
@@ -136,6 +159,9 @@ class EditSessionStore:
         for key in FIELD_SCALE_KEYS:
             if abs(float(values.get(key, 1.0)) - 1.0) > 1e-6:
                 return True
+        layout = values.get("layout") or {}
+        if isinstance(layout, dict) and layout:
+            return True
         return False
 
     def get_field(self, photo_path: str | Path | None, field: str) -> dict[str, Any]:
@@ -165,6 +191,19 @@ class EditSessionStore:
             except (TypeError, ValueError):
                 value = 1.0
             values[f"{field}_scale"] = min(1.6, max(0.7, value))
+        self._store(key, values)
+
+    def set_layout_patch(self, photo_path: str | Path | None, layout_patch: dict[str, Any]) -> None:
+        key = normalize_photo_path(photo_path)
+        if not key:
+            return
+        values = dict(self._photos.get(key) or empty_photo_overrides())
+        current = dict(values.get("layout") or {})
+        current.update(layout_patch)
+        values["layout"] = coerce_layout(current)
+        self._store(key, values)
+
+    def _store(self, key: str, values: dict[str, Any]) -> None:
         if self._photo_has_overrides(values):
             self._photos[key] = values
         else:

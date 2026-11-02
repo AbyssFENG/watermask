@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -16,7 +17,10 @@ from PIL import Image
 
 from photo_watermark_studio.core.models import PhotoMetadata
 from photo_watermark_studio.core.renderer import (
+    _font,
+    _frosted_overlay_strip,
     _metadata_lines,
+    _needs_cjk,
     format_exposure_line,
     metadata_placeholders,
     render_watermark,
@@ -73,6 +77,59 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(overlay.mode, "RGB")
         self.assertEqual(classic.mode, "RGB")
         self.assertEqual(card.mode, "RGB")
+
+    def test_overlay_frosted_uses_aligned_strip(self) -> None:
+        # 构造带明显横条的图，确保磨砂条与原图同宽同高、不因取样缩放错位。
+        base = Image.new("RGB", (200, 120), (30, 30, 30))
+        for y in range(80, 120):
+            for x in range(200):
+                base.putpixel((x, y), (200, 40, 40) if y < 100 else (40, 200, 40))
+        strip = _frosted_overlay_strip(base, top=80, height=40, radius=4)
+        self.assertEqual(strip.size, (200, 40))
+        # 模糊后仍应偏红（上半取样区），而不是被整段底部压扁后的混合色主导错位。
+        r, g, b = strip.getpixel((100, 5))
+        self.assertGreater(r, g)
+        self.assertGreater(r, b)
+        image = render_watermark(
+            self.source,
+            {**OPTIONS, "style": "极简叠加", "theme": "高斯模糊"},
+        )
+        with Image.open(self.source) as src:
+            self.assertEqual(image.size, src.size)
+
+    def test_chinese_caption_uses_cjk_font_and_keeps_text(self) -> None:
+        self.assertTrue(_needs_cjk("城市夜景"))
+        self.assertFalse(_needs_cjk("ISO 100"))
+        font = _font(18, text="城市夜景")
+        font_path = str(getattr(font, "path", "") or "").lower()
+        if os.name == "nt" and Path(r"C:\Windows\Fonts\msyh.ttc").is_file():
+            self.assertTrue(
+                any(name in font_path for name in ("msyh", "simhei", "simsun")),
+                font_path,
+            )
+        _image, hits = render_watermark_with_hits(
+            self.source,
+            {**OPTIONS, "caption": "城市夜景", "show_date": False, "show_gps": False},
+        )
+        caption_hits = [hit for hit in hits if hit.get("key") == "caption"]
+        self.assertTrue(caption_hits)
+        self.assertEqual(caption_hits[0]["text"], "城市夜景")
+        self.assertGreater(float(caption_hits[0]["w"]), 20)
+
+    def test_card_style_keeps_brand_with_logo(self) -> None:
+        _image, hits = render_watermark_with_hits(
+            self.source,
+            {
+                **OPTIONS,
+                "style": "卡片相框",
+                "brand": "Studio Name",
+                "logo_path": str(self.logo),
+            },
+        )
+        keys = {hit["key"] for hit in hits}
+        self.assertIn("brand", keys)
+        brand_hit = next(hit for hit in hits if hit["key"] == "brand")
+        self.assertEqual(brand_hit["text"], "Studio Name")
 
     def test_themes_logo_and_missing_logo_do_not_crash(self) -> None:
         for theme in ("浅色", "深色", "蓝色", "高斯模糊"):

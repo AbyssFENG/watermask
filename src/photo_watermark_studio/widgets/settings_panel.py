@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""右侧水印设置。控件只反映同一份配置。"""
+"""右侧分组属性面板（模板 / 内容 / 元数据 / 外观 / 布局 / 导出）。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -17,10 +18,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from photo_watermark_studio.core.document import ANCHORS, WatermarkDocument
 from photo_watermark_studio.core.settings_store import STYLES, THEMES, coerce_settings
 
 _META_FIELDS = (
@@ -31,15 +34,6 @@ _META_FIELDS = (
     ("gps", "GPS 坐标", "show_gps", "gps_text", "gps_scale", "showGpsBox"),
 )
 
-_FIELD_TEXT_KEYS = {
-    "camera": "camera_text",
-    "lens": "lens_text",
-    "exif": "exif_text",
-    "date": "date_text",
-    "gps": "gps_text",
-    "brand": "brand",
-    "caption": "caption",
-}
 _FIELD_SCALE_KEYS = {
     "camera": "camera_scale",
     "lens": "lens_scale",
@@ -48,14 +42,61 @@ _FIELD_SCALE_KEYS = {
     "gps": "gps_scale",
 }
 
+_ANCHOR_LABELS = {
+    "top_left": "左上",
+    "top_center": "上中",
+    "top_right": "右上",
+    "middle_left": "左中",
+    "center": "居中",
+    "middle_right": "右中",
+    "bottom_left": "左下",
+    "bottom_center": "下中",
+    "bottom_right": "右下",
+}
+
+
+class _Group(QFrame):
+    def __init__(self, title: str, expanded: bool = True) -> None:
+        super().__init__()
+        self.setObjectName("InspectorGroup")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 8)
+        outer.setSpacing(4)
+        self.toggle = QToolButton()
+        self.toggle.setObjectName("InspectorGroupToggle")
+        self.toggle.setText(title)
+        self.toggle.setCheckable(True)
+        self.toggle.setChecked(expanded)
+        self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self.body = QWidget()
+        self.body.setObjectName("InspectorGroupBody")
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(8, 4, 8, 8)
+        self.body_layout.setSpacing(6)
+        self.body.setVisible(expanded)
+        self.toggle.toggled.connect(self._on_toggle)
+        outer.addWidget(self.toggle)
+        outer.addWidget(self.body)
+
+    def _on_toggle(self, checked: bool) -> None:
+        self.body.setVisible(checked)
+        self.toggle.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
+
+    def add(self, widget: QWidget) -> None:
+        self.body_layout.addWidget(widget)
+
 
 class SettingsPanel(QFrame):
     optionsChanged = Signal()
+    chooseLogoRequested = Signal()
+    clearLogoRequested = Signal()
+    chooseOutputRequested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("Panel")
-        self.setMinimumWidth(286)
+        self.setMinimumWidth(300)
         self._loading = False
         self._logo_path = ""
         self._output_dir = ""
@@ -66,63 +107,95 @@ class SettingsPanel(QFrame):
             "date": "",
             "gps": "",
         }
-        self._field_texts: dict[str, str] = {key: "" for key in _FIELD_TEXT_KEYS}
+        self._field_texts: dict[str, str] = {
+            "brand": "",
+            "caption": "",
+            "camera": "",
+            "lens": "",
+            "exif": "",
+            "date": "",
+            "gps": "",
+        }
         self._field_scales: dict[str, float] = {key: 1.0 for key in _FIELD_SCALE_KEYS}
+        self._missing_hint = QLabel("")
+        self._missing_hint.setObjectName("MutedLabel")
+        self._missing_hint.setWordWrap(True)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 16, 0, 8)
-        layout.setSpacing(8)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        title = QLabel("水印设置")
+        header = QWidget()
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(16, 14, 16, 8)
+        title = QLabel("水印属性")
         title.setObjectName("PanelTitle")
-        title.setContentsMargins(16, 0, 16, 0)
-        layout.addWidget(title)
+        hint = QLabel("分组调整模板、内容、布局与导出")
+        hint.setObjectName("PanelHint")
+        hint.setWordWrap(True)
+        header_layout.addWidget(title)
+        header_layout.addWidget(hint)
+        root.addWidget(header)
 
         scroll = QScrollArea()
+        scroll.setObjectName("SettingsScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
         body.setObjectName("SettingsBody")
         form = QVBoxLayout(body)
-        form.setContentsMargins(16, 4, 16, 16)
-        form.setSpacing(6)
+        form.setContentsMargins(12, 4, 12, 16)
+        form.setSpacing(4)
 
-        form.addWidget(self._field_label("水印模板"))
+        # 模板
+        g_template = _Group("模板", True)
         self.style_combo = QComboBox()
         self.style_combo.setObjectName("styleCombo")
         self.style_combo.addItems(list(STYLES))
         self.style_combo.currentTextChanged.connect(self._emit)
-        form.addWidget(self.style_combo)
+        g_template.add(self._label("水印模板"))
+        g_template.add(self.style_combo)
+        form.addWidget(g_template)
 
-        form.addWidget(self._field_label("底栏 / 相框配色"))
-        self.theme_combo = QComboBox()
-        self.theme_combo.setObjectName("themeCombo")
-        self.theme_combo.addItems(list(THEMES))
-        self.theme_combo.currentTextChanged.connect(self._emit)
-        form.addWidget(self.theme_combo)
-
-        form.addWidget(self._field_label("品牌 / 摄影署名（留空则不显示）"))
+        # 内容
+        g_content = _Group("内容", True)
         self.brand_edit = QLineEdit()
         self.brand_edit.setObjectName("brandEdit")
         self.brand_edit.setPlaceholderText("留空则不显示")
         self.brand_edit.textChanged.connect(self._on_brand_changed)
-        form.addWidget(self.brand_edit)
-
-        form.addWidget(self._field_label("自定义说明（可选）"))
         self.caption_edit = QLineEdit()
         self.caption_edit.setObjectName("captionEdit")
         self.caption_edit.setPlaceholderText("例如 城市 · 天气")
         self.caption_edit.textChanged.connect(self._on_caption_changed)
-        form.addWidget(self.caption_edit)
+        self.logo_label = QLabel("未选择 Logo（支持透明 PNG）")
+        self.logo_label.setObjectName("PathLabel")
+        self.logo_label.setWordWrap(True)
+        logo_row = QHBoxLayout()
+        self.logo_button = QPushButton("选择 Logo")
+        self.logo_button.setObjectName("chooseLogoButton")
+        self.logo_button.setProperty("role", "soft")
+        self.logo_button.clicked.connect(self.chooseLogoRequested)
+        self.clear_logo_button = QPushButton("移除")
+        self.clear_logo_button.setObjectName("clearLogoButton")
+        self.clear_logo_button.setProperty("role", "soft")
+        self.clear_logo_button.clicked.connect(self.clearLogoRequested)
+        logo_row.addWidget(self.logo_button)
+        logo_row.addWidget(self.clear_logo_button)
+        self.show_brand_text = self._check("Logo 旁显示署名", "showBrandTextBox")
+        g_content.add(self._label("品牌 / 摄影署名"))
+        g_content.add(self.brand_edit)
+        g_content.add(self._label("自定义说明"))
+        g_content.add(self.caption_edit)
+        g_content.add(self._label("Logo"))
+        g_content.add(self.logo_label)
+        g_content.body_layout.addLayout(logo_row)
+        g_content.add(self.show_brand_text)
+        form.addWidget(g_content)
 
-        form.addWidget(self._divider())
-        form.addWidget(self._field_label("自动读取并显示的照片信息"))
-        hint = QLabel("勾选要显示的项。点击预览中的水印文字可改文案和字号（写入临时文件，导出或退出后清除）。")
-        hint.setObjectName("MutedLabel")
-        hint.setWordWrap(True)
-        form.addWidget(hint)
-
+        # 元数据
+        g_meta = _Group("元数据", True)
+        g_meta.add(self._label("勾选要显示的项；缺失字段不会伪造"))
+        g_meta.add(self._missing_hint)
         checks = QGridLayout()
         checks.setHorizontalSpacing(10)
         checks.setVerticalSpacing(6)
@@ -131,16 +204,27 @@ class SettingsPanel(QFrame):
         self.show_exif = self._check("曝光参数", "showExifBox")
         self.show_date = self._check("拍摄时间", "showDateBox")
         self.show_gps = self._check("GPS 坐标", "showGpsBox")
-        self.show_brand_text = self._check("Logo 旁显示署名", "showBrandTextBox")
         checks.addWidget(self.show_camera, 0, 0)
         checks.addWidget(self.show_lens, 0, 1)
         checks.addWidget(self.show_exif, 1, 0)
         checks.addWidget(self.show_date, 1, 1)
         checks.addWidget(self.show_gps, 2, 0)
-        checks.addWidget(self.show_brand_text, 2, 1)
-        form.addLayout(checks)
+        g_meta.body_layout.addLayout(checks)
+        tip = QLabel("点击预览中的水印文字可改文案和字号（按张保存，可撤销）。")
+        tip.setObjectName("MutedLabel")
+        tip.setWordWrap(True)
+        g_meta.add(tip)
+        form.addWidget(g_meta)
 
-        form.addWidget(self._field_label("水印大小"))
+        # 外观
+        g_look = _Group("外观", True)
+        self.theme_combo = QComboBox()
+        self.theme_combo.setObjectName("themeCombo")
+        self.theme_combo.addItems(list(THEMES))
+        self.theme_combo.currentTextChanged.connect(self._emit)
+        g_look.add(self._label("底栏 / 相框配色"))
+        g_look.add(self.theme_combo)
+        g_look.add(self._label("水印大小"))
         scale_row = QHBoxLayout()
         self.scale_slider = QSlider(Qt.Orientation.Horizontal)
         self.scale_slider.setObjectName("scaleSlider")
@@ -152,41 +236,78 @@ class SettingsPanel(QFrame):
         self.scale_value.setMinimumWidth(48)
         scale_row.addWidget(self.scale_slider, 1)
         scale_row.addWidget(self.scale_value)
-        form.addLayout(scale_row)
+        g_look.body_layout.addLayout(scale_row)
+        opacity_row = QHBoxLayout()
+        self.opacity_spin = QDoubleSpinBox()
+        self.opacity_spin.setObjectName("barOpacitySpin")
+        self.opacity_spin.setRange(0.15, 1.0)
+        self.opacity_spin.setSingleStep(0.05)
+        self.opacity_spin.setValue(0.72)
+        self.opacity_spin.valueChanged.connect(self._emit)
+        opacity_row.addWidget(self._label("底栏透明度"))
+        opacity_row.addWidget(self.opacity_spin)
+        g_look.body_layout.addLayout(opacity_row)
+        form.addWidget(g_look)
 
-        form.addWidget(self._divider())
-        form.addWidget(self._field_label("自定义 Logo"))
-        logo_row = QHBoxLayout()
-        self.choose_logo_button = QPushButton("选择图片…")
-        self.choose_logo_button.setObjectName("chooseLogoButton")
-        self.choose_logo_button.setProperty("role", "soft")
-        self.clear_logo_button = QPushButton("移除")
-        self.clear_logo_button.setObjectName("clearLogoButton")
-        self.clear_logo_button.setProperty("role", "soft")
-        logo_row.addWidget(self.choose_logo_button)
-        logo_row.addWidget(self.clear_logo_button)
-        logo_row.addStretch(1)
-        form.addLayout(logo_row)
-        self.logo_label = QLabel("未选择 Logo（支持透明 PNG）")
-        self.logo_label.setObjectName("MutedLabel")
-        self.logo_label.setWordWrap(True)
-        form.addWidget(self.logo_label)
+        # 位置与布局
+        g_layout = _Group("位置与布局", True)
+        self.anchor_combo = QComboBox()
+        self.anchor_combo.setObjectName("anchorCombo")
+        for key in ANCHORS:
+            self.anchor_combo.addItem(_ANCHOR_LABELS.get(key, key), key)
+        self.anchor_combo.currentIndexChanged.connect(self._emit)
+        g_layout.add(self._label("九宫格定位（主要影响极简叠加）"))
+        g_layout.add(self.anchor_combo)
+        margin_row = QHBoxLayout()
+        self.margin_x = QDoubleSpinBox()
+        self.margin_x.setRange(0.0, 0.35)
+        self.margin_x.setSingleStep(0.01)
+        self.margin_x.setDecimals(2)
+        self.margin_x.setObjectName("marginXSpin")
+        self.margin_x.valueChanged.connect(self._emit)
+        self.margin_y = QDoubleSpinBox()
+        self.margin_y.setRange(0.0, 0.35)
+        self.margin_y.setSingleStep(0.01)
+        self.margin_y.setDecimals(2)
+        self.margin_y.setObjectName("marginYSpin")
+        self.margin_y.valueChanged.connect(self._emit)
+        margin_row.addWidget(self._label("边距 X"))
+        margin_row.addWidget(self.margin_x)
+        margin_row.addWidget(self._label("Y"))
+        margin_row.addWidget(self.margin_y)
+        g_layout.body_layout.addLayout(margin_row)
+        offset_row = QHBoxLayout()
+        self.offset_x = QDoubleSpinBox()
+        self.offset_x.setRange(-0.45, 0.45)
+        self.offset_x.setSingleStep(0.01)
+        self.offset_x.setDecimals(2)
+        self.offset_x.setObjectName("offsetXSpin")
+        self.offset_x.valueChanged.connect(self._emit)
+        self.offset_y = QDoubleSpinBox()
+        self.offset_y.setRange(-0.45, 0.45)
+        self.offset_y.setSingleStep(0.01)
+        self.offset_y.setDecimals(2)
+        self.offset_y.setObjectName("offsetYSpin")
+        self.offset_y.valueChanged.connect(self._emit)
+        offset_row.addWidget(self._label("偏移 X"))
+        offset_row.addWidget(self.offset_x)
+        offset_row.addWidget(self._label("Y"))
+        offset_row.addWidget(self.offset_y)
+        g_layout.body_layout.addLayout(offset_row)
+        form.addWidget(g_layout)
 
-        form.addWidget(self._field_label("导出目录"))
-        output_row = QHBoxLayout()
-        self.output_label = QLabel()
+        # 导出
+        g_export = _Group("导出", True)
+        self.output_label = QLabel("")
         self.output_label.setObjectName("PathLabel")
         self.output_label.setWordWrap(True)
-        self.choose_output_button = QPushButton("选择")
-        self.choose_output_button.setObjectName("chooseOutputButton")
-        self.choose_output_button.setProperty("role", "soft")
-        output_row.addWidget(self.output_label, 1)
-        output_row.addWidget(self.choose_output_button)
-        form.addLayout(output_row)
-
-        quality_caption = QLabel("导出为 JPG · 质量")
-        quality_caption.setObjectName("MutedLabel")
-        form.addWidget(quality_caption)
+        self.output_button = QPushButton("选择导出目录")
+        self.output_button.setObjectName("chooseOutputButton")
+        self.output_button.setProperty("role", "soft")
+        self.output_button.clicked.connect(self.chooseOutputRequested)
+        g_export.add(self._label("导出目录"))
+        g_export.add(self.output_label)
+        g_export.add(self.output_button)
         quality_row = QHBoxLayout()
         self.quality_slider = QSlider(Qt.Orientation.Horizontal)
         self.quality_slider.setObjectName("qualitySlider")
@@ -195,14 +316,22 @@ class SettingsPanel(QFrame):
         self.quality_slider.valueChanged.connect(self._on_quality)
         self.quality_value = QLabel("95")
         self.quality_value.setObjectName("ValueLabel")
-        self.quality_value.setMinimumWidth(32)
+        quality_row.addWidget(self._label("JPG 质量"))
         quality_row.addWidget(self.quality_slider, 1)
         quality_row.addWidget(self.quality_value)
-        form.addLayout(quality_row)
+        g_export.body_layout.addLayout(quality_row)
+        self.conflict_combo = QComboBox()
+        self.conflict_combo.setObjectName("conflictCombo")
+        self.conflict_combo.addItem("重名时自动编号", "number")
+        self.conflict_combo.addItem("重名时覆盖（需确认）", "overwrite")
+        self.conflict_combo.currentIndexChanged.connect(self._emit)
+        g_export.add(self._label("文件冲突"))
+        g_export.add(self.conflict_combo)
+        form.addWidget(g_export)
         form.addStretch(1)
 
         scroll.setWidget(body)
-        layout.addWidget(scroll, 1)
+        root.addWidget(scroll, 1)
 
         self._inputs = [
             self.style_combo,
@@ -217,20 +346,19 @@ class SettingsPanel(QFrame):
             self.show_brand_text,
             self.scale_slider,
             self.quality_slider,
+            self.opacity_spin,
+            self.anchor_combo,
+            self.margin_x,
+            self.margin_y,
+            self.offset_x,
+            self.offset_y,
+            self.conflict_combo,
         ]
 
-    def _field_label(self, text: str) -> QLabel:
+    def _label(self, text: str) -> QLabel:
         label = QLabel(text)
         label.setObjectName("FieldLabel")
-        label.setWordWrap(True)
         return label
-
-    def _divider(self) -> QFrame:
-        line = QFrame()
-        line.setObjectName("Divider")
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFixedHeight(1)
-        return line
 
     def _check(self, text: str, object_name: str) -> QCheckBox:
         box = QCheckBox(text)
@@ -285,6 +413,16 @@ class SettingsPanel(QFrame):
         self.output_label.setToolTip(path)
         self._emit()
 
+    def set_layout_offset(self, ox: float, oy: float) -> None:
+        self._loading = True
+        self.offset_x.blockSignals(True)
+        self.offset_y.blockSignals(True)
+        self.offset_x.setValue(float(ox))
+        self.offset_y.setValue(float(oy))
+        self.offset_x.blockSignals(False)
+        self.offset_y.blockSignals(False)
+        self._loading = False
+
     def set_metadata_placeholders(self, values: dict[str, str] | None) -> None:
         data = values or {}
         self._placeholders = {
@@ -294,12 +432,16 @@ class SettingsPanel(QFrame):
             "date": str(data.get("date", "") or ""),
             "gps": str(data.get("gps", "") or ""),
         }
+        missing = [label for key, label, *_rest in _META_FIELDS if not self._placeholders.get(key)]
+        if missing:
+            self._missing_hint.setText("当前照片缺少：" + "、".join(missing))
+        else:
+            self._missing_hint.setText("当前照片 EXIF 字段齐全。")
 
     def placeholders(self) -> dict[str, str]:
         return dict(self._placeholders)
 
     def field_editor_state(self, key: str) -> dict[str, Any]:
-        """仅用于品牌/说明等常驻字段；元数据项由主窗口结合临时会话组装。"""
         scale_key = _FIELD_SCALE_KEYS.get(key)
         if key == "brand":
             custom = self.brand_edit.text()
@@ -335,6 +477,16 @@ class SettingsPanel(QFrame):
             self._emit()
 
     def state(self) -> dict[str, Any]:
+        layout = {
+            "anchor": self.anchor_combo.currentData(),
+            "margin_x": self.margin_x.value(),
+            "margin_y": self.margin_y.value(),
+            "offset_x": self.offset_x.value(),
+            "offset_y": self.offset_y.value(),
+            "bar_opacity": self.opacity_spin.value(),
+            "corner_radius": 0,
+            "blur_radius": 12.0,
+        }
         data: dict[str, Any] = {
             "style": self.style_combo.currentText(),
             "theme": self.theme_combo.currentText(),
@@ -350,15 +502,20 @@ class SettingsPanel(QFrame):
             "show_brand_text": self.show_brand_text.isChecked(),
             "quality": self.quality_slider.value(),
             "output_dir": self._output_dir,
+            "layout": layout,
+            "conflict_policy": self.conflict_combo.currentData(),
         }
-        # 元数据文案/字号只存在临时会话，不写入正式设置。
         for key, _label, _show_key, text_key, scale_key, _check_name in _META_FIELDS:
             data[text_key] = ""
             data[scale_key] = 1.0
         return data
 
+    def document(self) -> WatermarkDocument:
+        return WatermarkDocument(self.state())
+
     def set_state(self, state: dict[str, Any]) -> None:
         data = coerce_settings(state)
+        layout = data.get("layout") if isinstance(data.get("layout"), dict) else {}
         self._loading = True
         for widget in self._inputs:
             widget.blockSignals(True)
@@ -389,6 +546,17 @@ class SettingsPanel(QFrame):
             self._output_dir = str(data["output_dir"])
             self.output_label.setText(self._output_dir)
             self.output_label.setToolTip(self._output_dir)
+            self.opacity_spin.setValue(float(layout.get("bar_opacity", 0.72)))
+            self.margin_x.setValue(float(layout.get("margin_x", 0.0)))
+            self.margin_y.setValue(float(layout.get("margin_y", 0.0)))
+            self.offset_x.setValue(float(layout.get("offset_x", 0.0)))
+            self.offset_y.setValue(float(layout.get("offset_y", 0.0)))
+            anchor = str(layout.get("anchor", "bottom_center"))
+            idx = self.anchor_combo.findData(anchor)
+            self.anchor_combo.setCurrentIndex(idx if idx >= 0 else self.anchor_combo.findData("bottom_center"))
+            policy = str(data.get("conflict_policy", "number"))
+            pidx = self.conflict_combo.findData(policy)
+            self.conflict_combo.setCurrentIndex(pidx if pidx >= 0 else 0)
         finally:
             for widget in self._inputs:
                 widget.blockSignals(False)

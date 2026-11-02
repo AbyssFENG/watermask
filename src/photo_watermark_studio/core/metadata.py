@@ -11,6 +11,21 @@ from PIL import ExifTags, Image
 from photo_watermark_studio.core.models import PhotoMetadata
 
 
+def _clean_exif_text(value: Any) -> str:
+    """清理 EXIF 文本：截断空字节填充，去掉控制字符与首尾空白。"""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        text = value.split(b"\x00", 1)[0].decode("utf-8", errors="ignore")
+    else:
+        text = str(value)
+        if "\x00" in text:
+            text = text.split("\x00", 1)[0]
+    # 去掉其余控制字符（保留普通空白，最后再 strip）
+    cleaned = "".join(ch for ch in text if ch == "\t" or ord(ch) >= 32)
+    return cleaned.strip()
+
+
 def _as_float(value: Any) -> Optional[float]:
     try:
         if hasattr(value, "numerator") and hasattr(value, "denominator"):
@@ -52,7 +67,7 @@ def _format_shutter(value: Any) -> str:
 def _format_datetime(value: Any) -> str:
     if not value:
         return ""
-    s = str(value).strip()
+    s = _clean_exif_text(value)
     for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y:%m:%d"):
         try:
             return datetime.strptime(s, fmt).strftime("%Y.%m.%d  %H:%M:%S" if "%H" in fmt else "%Y.%m.%d")
@@ -82,8 +97,8 @@ def read_photo_metadata(path: str | Path) -> PhotoMetadata:
             exif = im.getexif()
             if not exif:
                 return md
-            md.make = str(exif.get(271, "") or "").strip()
-            model = str(exif.get(272, "") or "").strip()
+            md.make = _clean_exif_text(exif.get(271, ""))
+            model = _clean_exif_text(exif.get(272, ""))
             if model and md.make and model.upper().startswith(md.make.upper()):
                 md.camera = model.upper()
             elif model:
@@ -99,7 +114,7 @@ def read_photo_metadata(path: str | Path) -> PhotoMetadata:
 
             lens = exif_ifd.get(42036) or exif_ifd.get(0xA434) or exif.get(42036) or exif.get(0xA434)
             if lens:
-                md.lens = str(lens).strip().upper()
+                md.lens = _clean_exif_text(lens).upper()
             md.focal = _format_focal(exif_ifd.get(37386) or exif.get(37386))
             md.aperture = _format_aperture(exif_ifd.get(33437) or exif.get(33437))
             md.shutter = _format_shutter(exif_ifd.get(33434) or exif.get(33434))
@@ -107,7 +122,7 @@ def read_photo_metadata(path: str | Path) -> PhotoMetadata:
             if isinstance(iso, (tuple, list)):
                 iso = iso[0] if iso else None
             if iso is not None:
-                md.iso = str(iso)
+                md.iso = _clean_exif_text(iso)
             date = exif_ifd.get(36867) or exif_ifd.get(36868) or exif.get(36867) or exif.get(306)
             md.date = _format_datetime(date)
 

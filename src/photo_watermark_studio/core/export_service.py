@@ -10,21 +10,22 @@ from PIL import Image
 from photo_watermark_studio.core.renderer import render_watermark
 
 
-def allocate_output_path(source: str | Path, output_dir: str | Path) -> Path:
+def allocate_output_path(
+    source: str | Path,
+    output_dir: str | Path,
+    conflict_policy: str = "number",
+) -> Path:
     """选择导出文件名。默认 `原名_watermark.jpg`，不覆盖原图。
 
-    输出目录和原图不在同一文件夹、且目标文件已存在时，追加 `_2`、`_3`。
-    与旧版相同：导出到原图所在目录时，允许覆盖已有的水印文件，但不会写回原文件名。
+    conflict_policy=number：目标已存在时追加 `_2`、`_3`。
+    conflict_policy=overwrite：允许覆盖已有水印文件，仍不会写回原文件名。
     """
     source_path = Path(source)
     folder = Path(output_dir)
     folder.mkdir(parents=True, exist_ok=True)
     out_path = folder / f"{source_path.stem}_watermark.jpg"
-    try:
-        same_folder = source_path.resolve().parent == folder.resolve()
-    except OSError:
-        same_folder = False
-    if out_path.exists() and not same_folder:
+    policy = str(conflict_policy or "number")
+    if out_path.exists() and policy != "overwrite":
         stem = source_path.stem
         counter = 2
         while (folder / f"{stem}_watermark_{counter}.jpg").exists():
@@ -49,7 +50,8 @@ def allocate_output_path(source: str | Path, output_dir: str | Path) -> Path:
 def export_image(source: str | Path, output_dir: str | Path, options: dict[str, Any], quality: int) -> str:
     """按原图重新渲染并保存 JPEG。返回输出路径。"""
     image = render_watermark(source, options)
-    out_path = allocate_output_path(source, output_dir)
+    policy = str(options.get("conflict_policy", "number") or "number")
+    out_path = allocate_output_path(source, output_dir, conflict_policy=policy)
     try:
         q = int(quality)
     except (TypeError, ValueError):

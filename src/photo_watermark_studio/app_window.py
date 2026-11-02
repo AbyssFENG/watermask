@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
-"""主窗口：顶栏、三栏工作区和底栏。"""
+"""主窗口：顶栏菜单、三栏工作区和底栏摘要。"""
 from __future__ import annotations
 
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -33,11 +32,12 @@ class MainWindow(QMainWindow):
     def __init__(self, settings_path: Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.resize(1400, 900)
-        self.setMinimumSize(1120, 720)
+        self.resize(1440, 900)
+        self.setMinimumSize(1100, 700)
         self.suppress_dialogs = False
         self.last_notice = ("", "", "")
         self._output_dir_full = ""
+        self._pending_preview = None
 
         self.controller = PhotoController(settings_path)
         self.photo_list = PhotoListPanel()
@@ -55,32 +55,36 @@ class MainWindow(QMainWindow):
 
         mid = QWidget()
         mid_layout = QVBoxLayout(mid)
-        mid_layout.setContentsMargins(18, 16, 18, 12)
+        mid_layout.setContentsMargins(16, 12, 16, 8)
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("MainSplitter")
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setHandleWidth(12)
+        self.splitter.setChildrenCollapsible(True)
+        self.splitter.setHandleWidth(10)
         self.splitter.addWidget(self.photo_list)
         self.splitter.addWidget(self.preview)
         self.splitter.addWidget(self.settings)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 4)
         self.splitter.setStretchFactor(2, 2)
-        self.splitter.setSizes([260, 780, 340])
+        self.splitter.setSizes([260, 820, 320])
         mid_layout.addWidget(self.splitter)
         outer.addWidget(mid, 1)
         outer.addWidget(self._build_status_bar())
         self.setCentralWidget(root)
+        self._build_menus()
 
         self._connect()
         self.status_label.setText("添加照片开始制作水印。原图不会被修改。")
         self._refresh_output_label()
         self.controller.set_preview_size(*self.preview.viewport_size())
+        self.controller._emit_summary()
+        if self.controller._had_session:
+            self.status_label.setText("已恢复上次未完成的单张调整。")
 
     def _build_header(self) -> QWidget:
         header = QWidget()
         header.setObjectName("Header")
-        header.setFixedHeight(72)
+        header.setFixedHeight(56)
         layout = QHBoxLayout(header)
         layout.setContentsMargins(22, 0, 24, 0)
         layout.setSpacing(10)
@@ -88,17 +92,17 @@ class MainWindow(QMainWindow):
         mark = QLabel("光")
         mark.setObjectName("LogoMark")
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        mark.setFixedSize(38, 38)
+        mark.setFixedSize(34, 34)
 
         title = QLabel("光影水印")
         title.setObjectName("AppTitle")
-        subtitle = QLabel("PHOTO WATERMARK STUDIO  ·  本地照片元数据水印工具")
+        subtitle = QLabel("Photo Watermark Studio  ·  本地照片元数据水印工具")
         subtitle.setObjectName("AppSubtitle")
         for label in (title, subtitle):
             label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         titles = QVBoxLayout()
         titles.setContentsMargins(0, 0, 0, 0)
-        titles.setSpacing(1)
+        titles.setSpacing(0)
         titles.addWidget(title)
         titles.addWidget(subtitle)
 
@@ -108,10 +112,63 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return header
 
+    def _build_menus(self) -> None:
+        file_menu = self.menuBar().addMenu("文件")
+        act_add = QAction("添加照片", self)
+        act_add.setShortcut(QKeySequence.StandardKey.Open)
+        act_add.triggered.connect(self._add_files)
+        act_folder = QAction("导入文件夹", self)
+        act_folder.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        act_folder.triggered.connect(self._add_folder)
+        act_save = QAction("保存当前图片", self)
+        act_save.setShortcut(QKeySequence.StandardKey.Save)
+        act_save.triggered.connect(self._save_current)
+        act_export = QAction("批量导出", self)
+        act_export.triggered.connect(self._export_all)
+        act_quit = QAction("退出", self)
+        act_quit.setShortcut(QKeySequence.StandardKey.Quit)
+        act_quit.triggered.connect(self.close)
+        file_menu.addAction(act_add)
+        file_menu.addAction(act_folder)
+        file_menu.addSeparator()
+        file_menu.addAction(act_save)
+        file_menu.addAction(act_export)
+        file_menu.addSeparator()
+        file_menu.addAction(act_quit)
+
+        edit_menu = self.menuBar().addMenu("编辑")
+        self.act_undo = QAction("撤销", self)
+        self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        self.act_undo.triggered.connect(self.controller.undo)
+        self.act_redo = QAction("重做", self)
+        self.act_redo.setShortcut(QKeySequence.StandardKey.Redo)
+        self.act_redo.triggered.connect(self.controller.redo)
+        act_reset = QAction("重置当前照片调整", self)
+        act_reset.triggered.connect(lambda: self.controller.reset_photo_overrides())
+        edit_menu.addAction(self.act_undo)
+        edit_menu.addAction(self.act_redo)
+        edit_menu.addSeparator()
+        edit_menu.addAction(act_reset)
+
+        view_menu = self.menuBar().addMenu("视图")
+        act_fit = QAction("适应窗口", self)
+        act_fit.setShortcut(QKeySequence("0"))
+        act_fit.triggered.connect(self.preview.fit_in_view)
+        act_100 = QAction("100% 查看", self)
+        act_100.setShortcut(QKeySequence("1"))
+        act_100.triggered.connect(lambda: self.preview.view.set_user_scale(1.0))
+        view_menu.addAction(act_fit)
+        view_menu.addAction(act_100)
+
+        help_menu = self.menuBar().addMenu("帮助")
+        act_about = QAction("关于", self)
+        act_about.triggered.connect(self._about)
+        help_menu.addAction(act_about)
+
     def _build_status_bar(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName("StatusBar")
-        bar.setFixedHeight(66)
+        bar.setFixedHeight(64)
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(24, 10, 16, 10)
         layout.setSpacing(8)
@@ -120,10 +177,13 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("StatusLabel")
         self.status_label.setWordWrap(False)
 
+        self.summary_label = QLabel()
+        self.summary_label.setObjectName("StatusSummary")
+
         self.output_status = QLabel()
         self.output_status.setObjectName("StatusPath")
-        self.output_status.setMinimumWidth(160)
-        self.output_status.setMaximumWidth(320)
+        self.output_status.setMinimumWidth(140)
+        self.output_status.setMaximumWidth(280)
 
         self.cancel_button = QPushButton("取消后续")
         self.cancel_button.setObjectName("cancelExportButton")
@@ -139,6 +199,7 @@ class MainWindow(QMainWindow):
         self.export_button.setProperty("role", "primary")
 
         layout.addWidget(self.status_label, 1)
+        layout.addWidget(self.summary_label)
         layout.addWidget(self.output_status)
         layout.addWidget(self.cancel_button)
         layout.addWidget(self.save_button)
@@ -148,31 +209,54 @@ class MainWindow(QMainWindow):
     def _connect(self) -> None:
         self.photo_list.addFilesRequested.connect(self._add_files)
         self.photo_list.addFolderRequested.connect(self._add_folder)
-        self.photo_list.clearRequested.connect(self.controller.clear)
+        self.photo_list.clearRequested.connect(self._clear_photos)
         self.photo_list.removeRequested.connect(self._remove_selected)
         self.photo_list.selectionChanged.connect(self.controller.select)
-        self.preview.refreshRequested.connect(self.controller.refresh_preview)
-        self.preview.resized.connect(self.controller.set_preview_size)
+        self.photo_list.pathsDropped.connect(self._on_paths_dropped)
+        self.photo_list.resetPhotoRequested.connect(self.controller.reset_photo_overrides)
         self.preview.fieldEditRequested.connect(self._on_field_edit_requested)
         self.preview.fieldChanged.connect(self._on_field_changed)
+        self.preview.layoutOffsetChanged.connect(self._on_layout_offset)
         self.settings.optionsChanged.connect(self._on_settings)
-        self.settings.choose_logo_button.clicked.connect(self._choose_logo)
-        self.settings.clear_logo_button.clicked.connect(lambda: self.settings.set_logo_path(""))
-        self.settings.choose_output_button.clicked.connect(self._choose_output)
+        self.settings.chooseLogoRequested.connect(self._choose_logo)
+        self.settings.clearLogoRequested.connect(lambda: self.settings.set_logo_path(""))
+        self.settings.chooseOutputRequested.connect(self._choose_output)
         self.save_button.clicked.connect(self._save_current)
-        self.export_button.clicked.connect(self.controller.export_all)
+        self.export_button.clicked.connect(self._export_all)
         self.cancel_button.clicked.connect(self.controller.cancel_export)
 
         self.controller.statusChanged.connect(self.status_label.setText)
         self.controller.filesChanged.connect(self._on_files)
         self.controller.currentChanged.connect(self._on_current)
         self.controller.metadataHints.connect(self.settings.set_metadata_placeholders)
-        self.controller.previewImage.connect(self.preview.show_image)
-        self.controller.previewHits.connect(self.preview.set_hits)
+        self.controller.previewImage.connect(self._on_preview_image)
+        self.controller.previewHits.connect(self._on_preview_hits)
         self.controller.previewMessage.connect(self.preview.show_message)
+        self.controller.sourceImage.connect(self.preview.set_source_image)
         self.controller.notice.connect(self._on_notice)
         self.controller.exportRunningChanged.connect(self._on_export_running)
         self.controller.editSessionCleared.connect(self._on_edit_session_cleared)
+        self.controller.photoStatusesChanged.connect(self._on_statuses)
+        self.controller.summaryChanged.connect(self._on_summary)
+        self.controller.historyChanged.connect(self._on_history)
+
+    def _on_preview_image(self, image) -> None:
+        options = self.controller.render_options()
+        self.preview.set_layout_offset(
+            float(options.get("offset_x", 0.0) or 0.0),
+            float(options.get("offset_y", 0.0) or 0.0),
+        )
+        self._pending_preview = image
+
+    def _on_preview_hits(self, hits: object) -> None:
+        image = self._pending_preview
+        if image is None:
+            return
+        self.preview.set_preview_image(image, hits if isinstance(hits, list) else [])
+
+    def _on_layout_offset(self, ox: float, oy: float) -> None:
+        self.settings.set_layout_offset(ox, oy)
+        self.controller.apply_layout_offset(ox, oy)
 
     def _on_settings(self) -> None:
         state = self.settings.state()
@@ -184,10 +268,35 @@ class MainWindow(QMainWindow):
         self.photo_list.set_paths(items, self.controller.current_path)
 
     def _on_current(self, path: str) -> None:
-        self.preview.set_filename(Path(path).name if path else "尚未选择照片")
         self.photo_list.set_current_path(path)
-        # 换图时关掉上一张的编辑条，避免文案串到下一张。
-        self.preview.hide_editor()
+        self.preview.set_photo_token(path)
+        self.preview.hide_field_editor()
+        options = self.controller.render_options(path or None)
+        self.preview.set_layout_offset(
+            float(options.get("offset_x", 0.0) or 0.0),
+            float(options.get("offset_y", 0.0) or 0.0),
+        )
+
+    def _on_statuses(self, mapping: object) -> None:
+        if isinstance(mapping, dict):
+            self.photo_list.set_statuses({str(k): str(v) for k, v in mapping.items()})
+            for path, err in self.controller.photo_errors.items():
+                self.photo_list.set_photo_meta(path, error=err)
+
+    def _on_summary(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        total = int(payload.get("total", 0))
+        pending = int(payload.get("pending", 0))
+        style = str(payload.get("style", ""))
+        self.summary_label.setText(f"{total} 张 · {pending} 待处理 · {style}")
+        enabled = total > 0
+        self.save_button.setEnabled(enabled and not self.controller._exporting)
+        self.export_button.setEnabled(enabled and not self.controller._exporting)
+
+    def _on_history(self, can_undo: bool, can_redo: bool) -> None:
+        self.act_undo.setEnabled(can_undo)
+        self.act_redo.setEnabled(can_redo)
 
     def _on_field_edit_requested(self, key: str) -> None:
         from photo_watermark_studio.core.renderer import FIELD_LABELS
@@ -203,7 +312,6 @@ class MainWindow(QMainWindow):
         current = self.controller.current_path
         session = self.controller.edit_session.get_field(current, key)
         exif_text = self.settings.placeholders().get(key, "")
-        # 已有临时修改用临时内容；否则把 EXIF 原文填进输入框。
         filled = str(session.get("text", "") or "").strip() or exif_text
         self.preview.open_field_editor(
             {
@@ -225,11 +333,11 @@ class MainWindow(QMainWindow):
             self.controller.apply_edit_session_field(key, text, scale_value)
 
     def _on_edit_session_cleared(self) -> None:
-        self.preview.hide_editor()
+        self.preview.hide_field_editor()
 
     def _on_export_running(self, running: bool) -> None:
-        self.save_button.setEnabled(not running)
-        self.export_button.setEnabled(not running)
+        self.save_button.setEnabled(not running and bool(self.controller.files))
+        self.export_button.setEnabled(not running and bool(self.controller.files))
         self.cancel_button.setVisible(running)
 
     def _on_notice(self, level: str, title: str, message: str) -> None:
@@ -252,7 +360,7 @@ class MainWindow(QMainWindow):
         self.output_status.setToolTip(text)
         width = self.output_status.width()
         if width < 40:
-            width = 280
+            width = 240
         self.output_status.setText(
             self.output_status.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, width)
         )
@@ -287,6 +395,28 @@ class MainWindow(QMainWindow):
             self._remember_browse(folder)
             self.controller.add_folder(folder)
 
+    def _on_paths_dropped(self, paths: object) -> None:
+        items = [str(p) for p in paths] if isinstance(paths, list) else []
+        files: list[str] = []
+        for item in items:
+            path = Path(item)
+            if path.is_dir():
+                self.controller.add_folder(str(path))
+            elif path.is_file():
+                files.append(str(path))
+        if files:
+            self._remember_browse(files[0])
+            self.controller.add_paths(files)
+
+    def _clear_photos(self) -> None:
+        if not self.controller.files:
+            return
+        if not self.suppress_dialogs:
+            answer = QMessageBox.question(self, "清空素材", "确定从列表中移除全部照片？不会删除磁盘原图。")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.controller.clear()
+
     def _remove_selected(self) -> None:
         self.controller.remove_paths(self.photo_list.selected_paths())
 
@@ -308,6 +438,19 @@ class MainWindow(QMainWindow):
         if path:
             self.settings.set_output_dir(path)
 
+    def _export_all(self) -> None:
+        policy = str(self.settings.state().get("conflict_policy", "number"))
+        if policy == "overwrite" and not self.suppress_dialogs:
+            answer = QMessageBox.warning(
+                self,
+                "覆盖确认",
+                "当前冲突策略为覆盖已有水印文件。原图不会被覆盖，但同名 *_watermark.jpg 会被替换。是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.controller.export_all()
+
     def _save_current(self) -> None:
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
@@ -315,6 +458,23 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
+    def _about(self) -> None:
+        QMessageBox.information(
+            self,
+            "关于光影水印",
+            "光影水印 Photo Watermark Studio 2.0\n本地照片元数据水印工具。\n原图只读，结果另存。",
+        )
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self.controller._exporting and not self.suppress_dialogs:
+            answer = QMessageBox.question(
+                self,
+                "正在导出",
+                "批量导出仍在进行。关闭将取消后续任务。是否关闭？",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self.controller.cancel_export()
         self.controller.shutdown()
         event.accept()

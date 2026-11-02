@@ -47,6 +47,19 @@ _FIELD_SCALE_MIN = 0.7
 _FIELD_SCALE_MAX = 1.6
 
 
+def default_layout() -> dict[str, Any]:
+    return {
+        "anchor": "bottom_center",
+        "margin_x": 0.0,
+        "margin_y": 0.0,
+        "offset_x": 0.0,
+        "offset_y": 0.0,
+        "bar_opacity": 0.72,
+        "corner_radius": 0,
+        "blur_radius": 12.0,
+    }
+
+
 def default_settings() -> dict[str, Any]:
     return {
         "output_dir": str(Path.home() / "Pictures" / "PhotoWatermark"),
@@ -74,6 +87,8 @@ def default_settings() -> dict[str, Any]:
         "date_scale": 1.0,
         "gps_scale": 1.0,
         "quality": 95,
+        "layout": default_layout(),
+        "conflict_policy": "number",
     }
 
 
@@ -126,6 +141,52 @@ def coerce_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     data["output_dir"] = output_dir or str(base["output_dir"])
     browse_dir = str(raw.get("browse_dir", "") or "").strip()
     data["browse_dir"] = browse_dir or str(base["browse_dir"])
+    layout_raw = raw.get("layout") if isinstance(raw.get("layout"), dict) else raw
+    # 延迟导入避免循环；coerce_layout 在 document 中定义时用本地简化版。
+    data["layout"] = coerce_layout(layout_raw if isinstance(layout_raw, dict) else None)
+    policy = str(raw.get("conflict_policy", base.get("conflict_policy", "number")) or "number")
+    data["conflict_policy"] = policy if policy in ("number", "overwrite") else "number"
+    return data
+
+
+def coerce_layout(raw: dict[str, Any] | None) -> dict[str, Any]:
+    base = default_layout()
+    if not isinstance(raw, dict):
+        return base
+    data = dict(base)
+    anchors = {
+        "top_left",
+        "top_center",
+        "top_right",
+        "middle_left",
+        "center",
+        "middle_right",
+        "bottom_left",
+        "bottom_center",
+        "bottom_right",
+    }
+    anchor = str(raw.get("anchor", base["anchor"]) or base["anchor"])
+    data["anchor"] = anchor if anchor in anchors else base["anchor"]
+
+    def _clamp(value: float, lo: float, hi: float) -> float:
+        return max(lo, min(hi, value))
+
+    for key, lo, hi in (
+        ("margin_x", 0.0, 0.35),
+        ("margin_y", 0.0, 0.35),
+        ("offset_x", -0.45, 0.45),
+        ("offset_y", -0.45, 0.45),
+        ("bar_opacity", 0.15, 1.0),
+        ("blur_radius", 1.0, 40.0),
+    ):
+        try:
+            data[key] = _clamp(float(raw.get(key, base[key])), lo, hi)
+        except (TypeError, ValueError):
+            data[key] = base[key]
+    try:
+        data["corner_radius"] = int(_clamp(float(raw.get("corner_radius", 0)), 0, 48))
+    except (TypeError, ValueError):
+        data["corner_radius"] = 0
     return data
 
 

@@ -1,5 +1,17 @@
 QMainWindow, QWidget#AppRoot {
-    background: #F3F5F8;
+    background: #F4F6FA;
+    color: #182230;
+}
+
+QMenuBar {
+    background: #FFFFFF;
+    color: #182230;
+    border-bottom: 1px solid #E5EAF1;
+    padding: 2px 8px;
+}
+
+QMenuBar::item:selected {
+    background: #EAF0FF;
     color: #182230;
 }
 
@@ -14,7 +26,7 @@ QWidget#StatusBar {
 }
 
 QLabel#LogoMark {
-    background: #275DDB;
+    background: #285BE8;
     color: #FFFFFF;
     border-radius: 8px;
     font-size: 16px;
@@ -279,4 +291,60 @@ QScrollBar::handle:vertical {
 
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0;
+}
+
+QToolButton#InspectorGroupToggle {
+    background: transparent;
+    color: #182230;
+    font-weight: 700;
+    font-size: 13px;
+    border: none;
+    padding: 6px 2px;
+    text-align: left;
+}
+
+QFrame#InspectorGroup {
+    background: transparent;
+    border-bottom: 1px solid #E5EAF1;
+}
+
+QLabel#EmptyCanvasLabel {
+    color: #7B8798;
+    font-size: 15px;
+    background: #EEF1F6;
+    border: 1px dashed #D5DDE8;
+    border-radius: 12px;
+    padding: 48px;
+    min-height: 220px;
+}
+
+QLabel#EmptyCanvasLabel[error="true"] {
+    color: #B42318;
+    border-color: #F3C1C1;
+    background: #FFF5F5;
+}
+
+QGraphicsView#CanvasView {
+    background: #E8ECF2;
+    border: 1px solid #E5EAF1;
+    border-radius: 10px;
+}
+
+QFrame#FieldEditorBar {
+    background: #F8FAFD;
+    border: 1px solid #E5EAF1;
+    border-radius: 10px;
+}
+
+QLabel#StatusSummary {
+    color: #526176;
+    font-weight: 600;
+    background: transparent;
+}
+
+QListWidget#fileList {
+    background: #FFFFFF;
+    border: 1px solid #E5EAF1;
+    border-radius: 10px;
+    padding: 6px;
 }

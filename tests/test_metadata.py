@@ -19,6 +19,7 @@ from PIL.TiffImagePlugin import IFDRational
 
 from photo_watermark_studio.core.metadata import (
     _as_float,
+    _clean_exif_text,
     _format_aperture,
     _format_datetime,
     _format_focal,
@@ -63,6 +64,15 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(PhotoMetadata(make="Hasselblad").brand, "Hasselblad")
         self.assertEqual(PhotoMetadata().brand, "")
 
+    def test_clean_exif_text_strips_null_padding(self) -> None:
+        self.assertEqual(
+            _clean_exif_text("NIKKOR Z 24-120mm f/4 S" + ("\x00" * 20)),
+            "NIKKOR Z 24-120mm f/4 S",
+        )
+        self.assertEqual(_clean_exif_text(b"NIKKOR Z\x00\x00\x00"), "NIKKOR Z")
+        self.assertEqual(_clean_exif_text("  lens \x07\x08 name  "), "lens  name")
+        self.assertEqual(_clean_exif_text(None), "")
+
 
 class ReadMetadataTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -102,6 +112,18 @@ class ReadMetadataTests(unittest.TestCase):
         self.assertEqual(metadata.iso, "200")
         self.assertEqual(metadata.date, "2024.05.01  12:30:00")
         self.assertEqual(metadata.gps, "30.25000, 120.50000")
+
+    def test_lens_null_padding_is_removed(self) -> None:
+        path = self.folder / "lens-pad.jpg"
+        image = Image.new("RGB", (32, 24), (20, 30, 40))
+        exif = image.getexif()
+        exif_ifd = exif.get_ifd(IFD.Exif)
+        exif_ifd[42036] = "NIKKOR Z 24-120mm f/4 S" + ("\x00" * 24)
+        image.save(path, format="JPEG", exif=exif)
+        metadata = read_photo_metadata(path)
+        self.assertEqual(metadata.lens, "NIKKOR Z 24-120MM F/4 S")
+        self.assertNotIn("\x00", metadata.lens)
+        self.assertTrue(metadata.lens.isprintable())
 
     def test_missing_or_damaged_image_returns_empty_fields(self) -> None:
         folder = self.folder

@@ -56,7 +56,7 @@ class ExportPathTests(_TempCase):
         chosen = allocate_output_path(source, output_dir)
         self.assertEqual(chosen.name, "photo_watermark_3.jpg")
 
-    def test_same_folder_keeps_the_watermark_name(self) -> None:
+    def test_same_folder_numbers_by_default(self) -> None:
         folder = self.root / "same"
         folder.mkdir(parents=True, exist_ok=True)
         source = folder / "photo.jpg"
@@ -64,8 +64,18 @@ class ExportPathTests(_TempCase):
         existing = folder / "photo_watermark.jpg"
         existing.write_bytes(b"old")
         chosen = allocate_output_path(source, folder)
-        self.assertEqual(chosen.name, "photo_watermark.jpg")
+        self.assertEqual(chosen.name, "photo_watermark_2.jpg")
         self.assertNotEqual(chosen.resolve(), source.resolve())
+
+    def test_overwrite_policy_keeps_watermark_name(self) -> None:
+        folder = self.root / "overwrite"
+        folder.mkdir(parents=True, exist_ok=True)
+        source = folder / "photo.jpg"
+        Image.new("RGB", (8, 8), "black").save(source, quality=90)
+        existing = folder / "photo_watermark.jpg"
+        existing.write_bytes(b"old")
+        chosen = allocate_output_path(source, folder, conflict_policy="overwrite")
+        self.assertEqual(chosen.name, "photo_watermark.jpg")
 
 
 class ExportImageTests(_TempCase):
