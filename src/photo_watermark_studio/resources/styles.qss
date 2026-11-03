@@ -310,12 +310,12 @@ QFrame#InspectorGroup {
 
 QLabel#EmptyCanvasLabel {
     color: #7B8798;
-    font-size: 15px;
+    font-size: 16px;
     background: #EEF1F6;
     border: 1px dashed #D5DDE8;
     border-radius: 12px;
     padding: 48px;
-    min-height: 220px;
+    min-height: 280px;
 }
 
 QLabel#EmptyCanvasLabel[error="true"] {

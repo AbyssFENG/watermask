@@ -94,11 +94,12 @@ class WatermarkDocument:
         """供 Pillow 渲染器使用的扁平 options（含 layout 字段展开）。"""
         options = {key: self._data[key] for key in OPTION_KEYS}
         layout = self.layout
-        options["anchor"] = layout["anchor"]
-        options["margin_x"] = layout["margin_x"]
-        options["margin_y"] = layout["margin_y"]
-        options["offset_x"] = layout["offset_x"]
-        options["offset_y"] = layout["offset_y"]
+        # 位置布局功能暂时关闭：固定默认底部，避免旧偏移/九宫格影响预览。
+        options["anchor"] = "bottom_center"
+        options["margin_x"] = 0.0
+        options["margin_y"] = 0.0
+        options["offset_x"] = 0.0
+        options["offset_y"] = 0.0
         options["bar_opacity"] = layout["bar_opacity"]
         options["corner_radius"] = layout["corner_radius"]
         options["blur_radius"] = layout["blur_radius"]

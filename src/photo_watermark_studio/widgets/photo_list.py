@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
 )
 
@@ -79,22 +80,31 @@ class PhotoListPanel(QFrame):
         row.addWidget(self.folder_button)
         row.addWidget(self.clear_button)
 
-        filter_row = QHBoxLayout()
+        filter_col = QVBoxLayout()
+        filter_col.setSpacing(6)
         self.search_edit = QLineEdit()
         self.search_edit.setObjectName("assetSearchEdit")
         self.search_edit.setPlaceholderText("搜索文件名")
+        self.search_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.search_edit.textChanged.connect(self._apply_filter)
+        filter_col.addWidget(self.search_edit)
+
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(6)
         self.sort_combo = QComboBox()
         self.sort_combo.setObjectName("assetSortCombo")
         self.sort_combo.addItems(["导入顺序", "文件名"])
+        self.sort_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.sort_combo.currentTextChanged.connect(self._apply_sort)
         self.view_combo = QComboBox()
         self.view_combo.setObjectName("assetViewCombo")
-        self.view_combo.addItems(["网格", "列表"])
+        self.view_combo.addItems(["列表", "网格"])
+        self.view_combo.setFixedWidth(72)
+        self.view_combo.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.view_combo.currentTextChanged.connect(self._apply_view_mode)
-        filter_row.addWidget(self.search_edit, 1)
-        filter_row.addWidget(self.sort_combo)
-        filter_row.addWidget(self.view_combo)
+        filter_row.addWidget(self.sort_combo, 1)
+        filter_row.addWidget(self.view_combo, 0)
+        filter_col.addLayout(filter_row)
 
         self.count_label = QLabel("已选 0 / 共 0")
         self.count_label.setObjectName("CountLabel")
@@ -119,7 +129,7 @@ class PhotoListPanel(QFrame):
         layout.addWidget(hint)
         layout.addWidget(self.add_button)
         layout.addLayout(row)
-        layout.addLayout(filter_row)
+        layout.addLayout(filter_col)
         layout.addWidget(self.count_label)
         layout.addWidget(self.list_widget, 1)
         layout.addWidget(self.remove_button)
@@ -129,7 +139,7 @@ class PhotoListPanel(QFrame):
         self._thumbs: dict[str, QPixmap] = {}
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(2)
-        self._apply_view_mode("网格")
+        self._apply_view_mode("列表")
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():

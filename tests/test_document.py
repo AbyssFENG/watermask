@@ -32,8 +32,11 @@ class DocumentTests(unittest.TestCase):
     def test_layout_patch(self) -> None:
         doc = WatermarkDocument()
         doc.set_layout(offset_x=0.1, offset_y=-0.05, anchor="top_center")
+        # 文档仍可记录布局；渲染侧暂时强制默认位置（功能已关闭）。
         self.assertEqual(doc.layout["anchor"], "top_center")
-        self.assertAlmostEqual(doc.render_options()["offset_x"], 0.1)
+        self.assertAlmostEqual(doc.layout["offset_x"], 0.1)
+        self.assertEqual(doc.render_options()["anchor"], "bottom_center")
+        self.assertAlmostEqual(doc.render_options()["offset_x"], 0.0)
 
     def test_coerce_keeps_conflict_policy(self) -> None:
         data = coerce_settings({"conflict_policy": "overwrite"})

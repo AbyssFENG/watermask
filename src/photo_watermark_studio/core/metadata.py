@@ -26,6 +26,51 @@ def _clean_exif_text(value: Any) -> str:
     return cleaned.strip()
 
 
+_CORP_SUFFIXES = (
+    " CORPORATION",
+    " CORP.",
+    " CORP",
+    " INCORPORATED",
+    " INC.",
+    " INC",
+    " CO., LTD.",
+    " CO.,LTD.",
+    " CO LTD",
+    " LTD.",
+    " LTD",
+    " COMPANY",
+)
+
+
+def _short_make(make: str) -> str:
+    """去掉厂商名里的公司后缀，如 NIKON CORPORATION → NIKON。"""
+    brand = make.strip().upper()
+    for suffix in _CORP_SUFFIXES:
+        if brand.endswith(suffix):
+            return brand[: -len(suffix)].strip()
+    return brand
+
+
+def _format_camera(make: str, model: str) -> str:
+    """组合相机型号；型号已含品牌时不再重复拼接厂商全称。"""
+    make = make.strip()
+    model = model.strip()
+    if not model and not make:
+        return ""
+    if not model:
+        return _short_make(make) or make.upper()
+    model_u = model.upper()
+    make_u = make.upper()
+    brand = _short_make(make)
+    if make_u and model_u.startswith(make_u):
+        return model_u
+    if brand and model_u.startswith(brand):
+        return model_u
+    if brand:
+        return f"{brand} {model_u}".strip()
+    return model_u
+
+
 def _as_float(value: Any) -> Optional[float]:
     try:
         if hasattr(value, "numerator") and hasattr(value, "denominator"):
@@ -99,12 +144,7 @@ def read_photo_metadata(path: str | Path) -> PhotoMetadata:
                 return md
             md.make = _clean_exif_text(exif.get(271, ""))
             model = _clean_exif_text(exif.get(272, ""))
-            if model and md.make and model.upper().startswith(md.make.upper()):
-                md.camera = model.upper()
-            elif model:
-                md.camera = f"{md.make} {model}".strip().upper()
-            else:
-                md.camera = md.make.upper()
+            md.camera = _format_camera(md.make, model)
 
             try:
                 exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)

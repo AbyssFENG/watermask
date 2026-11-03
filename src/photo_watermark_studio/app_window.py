@@ -120,7 +120,7 @@ class MainWindow(QMainWindow):
         act_folder = QAction("导入文件夹", self)
         act_folder.setShortcut(QKeySequence("Ctrl+Shift+O"))
         act_folder.triggered.connect(self._add_folder)
-        act_save = QAction("保存当前图片", self)
+        act_save = QAction("导出当前图片", self)
         act_save.setShortcut(QKeySequence.StandardKey.Save)
         act_save.triggered.connect(self._save_current)
         act_export = QAction("批量导出", self)
@@ -190,20 +190,24 @@ class MainWindow(QMainWindow):
         self.cancel_button.setProperty("role", "soft")
         self.cancel_button.setVisible(False)
 
-        self.save_button = QPushButton("保存当前图片")
+        self.save_button = QPushButton("导出当前图片")
         self.save_button.setObjectName("saveCurrentButton")
         self.save_button.setProperty("role", "soft")
+        self.save_button.setMinimumWidth(118)
 
         self.export_button = QPushButton("批量导出水印")
         self.export_button.setObjectName("exportAllButton")
         self.export_button.setProperty("role", "primary")
+        self.export_button.setMinimumWidth(118)
 
+        self.summary_label.setMinimumWidth(0)
+        self.output_status.setMaximumWidth(220)
         layout.addWidget(self.status_label, 1)
-        layout.addWidget(self.summary_label)
-        layout.addWidget(self.output_status)
-        layout.addWidget(self.cancel_button)
-        layout.addWidget(self.save_button)
-        layout.addWidget(self.export_button)
+        layout.addWidget(self.summary_label, 0)
+        layout.addWidget(self.output_status, 0)
+        layout.addWidget(self.cancel_button, 0)
+        layout.addWidget(self.save_button, 0)
+        layout.addWidget(self.export_button, 0)
         return bar
 
     def _connect(self) -> None:
@@ -216,7 +220,6 @@ class MainWindow(QMainWindow):
         self.photo_list.resetPhotoRequested.connect(self.controller.reset_photo_overrides)
         self.preview.fieldEditRequested.connect(self._on_field_edit_requested)
         self.preview.fieldChanged.connect(self._on_field_changed)
-        self.preview.layoutOffsetChanged.connect(self._on_layout_offset)
         self.settings.optionsChanged.connect(self._on_settings)
         self.settings.chooseLogoRequested.connect(self._choose_logo)
         self.settings.clearLogoRequested.connect(lambda: self.settings.set_logo_path(""))
@@ -241,11 +244,7 @@ class MainWindow(QMainWindow):
         self.controller.historyChanged.connect(self._on_history)
 
     def _on_preview_image(self, image) -> None:
-        options = self.controller.render_options()
-        self.preview.set_layout_offset(
-            float(options.get("offset_x", 0.0) or 0.0),
-            float(options.get("offset_y", 0.0) or 0.0),
-        )
+        self.preview.set_layout_offset(0.0, 0.0)
         self._pending_preview = image
 
     def _on_preview_hits(self, hits: object) -> None:
@@ -253,10 +252,6 @@ class MainWindow(QMainWindow):
         if image is None:
             return
         self.preview.set_preview_image(image, hits if isinstance(hits, list) else [])
-
-    def _on_layout_offset(self, ox: float, oy: float) -> None:
-        self.settings.set_layout_offset(ox, oy)
-        self.controller.apply_layout_offset(ox, oy)
 
     def _on_settings(self) -> None:
         state = self.settings.state()
@@ -271,11 +266,7 @@ class MainWindow(QMainWindow):
         self.photo_list.set_current_path(path)
         self.preview.set_photo_token(path)
         self.preview.hide_field_editor()
-        options = self.controller.render_options(path or None)
-        self.preview.set_layout_offset(
-            float(options.get("offset_x", 0.0) or 0.0),
-            float(options.get("offset_y", 0.0) or 0.0),
-        )
+        self.preview.set_layout_offset(0.0, 0.0)
 
     def _on_statuses(self, mapping: object) -> None:
         if isinstance(mapping, dict):

@@ -21,6 +21,7 @@ from photo_watermark_studio.core.metadata import (
     _as_float,
     _clean_exif_text,
     _format_aperture,
+    _format_camera,
     _format_datetime,
     _format_focal,
     _format_shutter,
@@ -60,9 +61,17 @@ class FormatTests(unittest.TestCase):
 
     def test_brand_mapping(self) -> None:
         self.assertEqual(PhotoMetadata(make="NIKON").brand, "Nikon")
+        self.assertEqual(PhotoMetadata(make="NIKON CORPORATION").brand, "Nikon")
         self.assertEqual(PhotoMetadata(make="OM Digital Solutions").brand, "OM SYSTEM")
         self.assertEqual(PhotoMetadata(make="Hasselblad").brand, "Hasselblad")
         self.assertEqual(PhotoMetadata().brand, "")
+
+    def test_format_camera_drops_redundant_make(self) -> None:
+        self.assertEqual(_format_camera("NIKON CORPORATION", "NIKON Z5_2"), "NIKON Z5_2")
+        self.assertEqual(_format_camera("NIKON", "NIKON Z 6"), "NIKON Z 6")
+        self.assertEqual(_format_camera("SONY", "ILCE-7M4"), "SONY ILCE-7M4")
+        self.assertEqual(_format_camera("Canon Inc.", "EOS R5"), "CANON EOS R5")
+        self.assertEqual(_format_camera("", "X100VI"), "X100VI")
 
     def test_clean_exif_text_strips_null_padding(self) -> None:
         self.assertEqual(
@@ -112,6 +121,18 @@ class ReadMetadataTests(unittest.TestCase):
         self.assertEqual(metadata.iso, "200")
         self.assertEqual(metadata.date, "2024.05.01  12:30:00")
         self.assertEqual(metadata.gps, "30.25000, 120.50000")
+
+    def test_nikon_corporation_make_not_duplicated(self) -> None:
+        path = self.folder / "nikon-corp.jpg"
+        image = Image.new("RGB", (32, 24), (20, 30, 40))
+        exif = image.getexif()
+        exif[271] = "NIKON CORPORATION"
+        exif[272] = "NIKON Z5_2"
+        image.save(path, format="JPEG", exif=exif)
+        metadata = read_photo_metadata(path)
+        self.assertEqual(metadata.camera, "NIKON Z5_2")
+        self.assertEqual(metadata.brand, "Nikon")
+        self.assertNotIn("CORPORATION", metadata.camera)
 
     def test_lens_null_padding_is_removed(self) -> None:
         path = self.folder / "lens-pad.jpg"

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
 from photo_watermark_studio.core.coordinate_mapper import CoordinateMapper, ImageSize, ViewRect
@@ -92,7 +93,10 @@ class CanvasPanel(QFrame):
         title_row.addStretch(1)
         root.addLayout(title_row)
 
-        tools = QHBoxLayout()
+        self.tools_bar = QWidget()
+        self.tools_bar.setObjectName("CanvasToolsBar")
+        tools = QHBoxLayout(self.tools_bar)
+        tools.setContentsMargins(0, 0, 0, 0)
         tools.setSpacing(6)
         self.fit_button = QPushButton("适应窗口")
         self.fit_button.setObjectName("fitViewButton")
@@ -120,7 +124,7 @@ class CanvasPanel(QFrame):
             tools.addWidget(btn)
         tools.addWidget(self.scale_label)
         tools.addStretch(1)
-        root.addLayout(tools)
+        root.addWidget(self.tools_bar)
 
         self.scene = QGraphicsScene(self)
         self.view = _ZoomView()
@@ -132,7 +136,8 @@ class CanvasPanel(QFrame):
         self.empty_label.setObjectName("EmptyCanvasLabel")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_label.setWordWrap(True)
-        root.addWidget(self.empty_label)
+        self.empty_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        root.addWidget(self.empty_label, 1)
 
         self.editor = QFrame()
         self.editor.setObjectName("FieldEditorBar")
@@ -156,11 +161,11 @@ class CanvasPanel(QFrame):
         er.addWidget(self.editor_text, 1)
         er.addWidget(self.editor_scale)
         er.addWidget(self.editor_close)
-        tip = QLabel("修改写入当前照片覆盖；可撤销。预览为高分辨率，可放大查看细节。")
-        tip.setObjectName("MutedLabel")
-        tip.setWordWrap(True)
+        self.tip = QLabel("修改写入当前照片覆盖；可撤销。预览为高分辨率，可放大查看细节。")
+        self.tip.setObjectName("MutedLabel")
+        self.tip.setWordWrap(True)
         root.addWidget(self.editor)
-        root.addWidget(tip)
+        root.addWidget(self.tip)
 
         self._photo_item = QGraphicsPixmapItem()
         self._photo_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
@@ -205,6 +210,9 @@ class CanvasPanel(QFrame):
         self.empty_label.setText(text)
         self.empty_label.setVisible(True)
         self.view.setVisible(False)
+        self.tools_bar.setVisible(False)
+        self.tip.setVisible(False)
+        self.editor.setVisible(False)
         self._photo_item.setPixmap(QPixmap())
         self._bar_item.setVisible(False)
         self._clear_hits()
@@ -238,6 +246,8 @@ class CanvasPanel(QFrame):
         self._watermark_image = QImage(image)
         self._hits = list(hits or [])
         self.empty_label.setVisible(False)
+        self.tools_bar.setVisible(True)
+        self.tip.setVisible(True)
         self.view.setVisible(True)
         self._apply_display_image()
         self._has_image = True
@@ -281,7 +291,8 @@ class CanvasPanel(QFrame):
         if bar_hit is not None:
             x, y, w, h = mapper.hit_to_scene(bar_hit)
             self._suppress_move = True
-            self._bar_item.set_geometry(QRectF(x, y, w, h), locked=False)
+            # 位置拖动暂关闭，底栏仅作选中/命中辅助，不可拖移。
+            self._bar_item.set_geometry(QRectF(x, y, w, h), locked=True)
             self._bar_item.set_mapper_context(
                 (float(self._image_size.width), float(self._image_size.height)),
                 (mapper.scale_x, mapper.scale_y),

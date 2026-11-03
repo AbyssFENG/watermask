@@ -102,7 +102,26 @@ class PhotoController(QObject):
     def render_options(self, photo_path: str | None = None) -> dict[str, Any]:
         base = self.document.render_options()
         base["conflict_policy"] = self.conflict_policy
-        return self.edit_session.merge_into(base, photo_path or self.current_path)
+        merged = self.edit_session.merge_into(base, photo_path or self.current_path)
+        # 位置布局暂关闭：合并单张覆盖后仍强制默认位置。
+        merged["anchor"] = "bottom_center"
+        merged["margin_x"] = 0.0
+        merged["margin_y"] = 0.0
+        merged["offset_x"] = 0.0
+        merged["offset_y"] = 0.0
+        if isinstance(merged.get("layout"), dict):
+            layout = dict(merged["layout"])
+            layout.update(
+                {
+                    "anchor": "bottom_center",
+                    "margin_x": 0.0,
+                    "margin_y": 0.0,
+                    "offset_x": 0.0,
+                    "offset_y": 0.0,
+                }
+            )
+            merged["layout"] = layout
+        return merged
 
     def snapshot(self) -> dict[str, Any]:
         data = self.document.settings_payload()
@@ -154,17 +173,8 @@ class PhotoController(QObject):
         self._save_timer.start()
 
     def apply_layout_offset(self, ox: float, oy: float) -> None:
-        if not self.current_path:
-            self.document.set_layout(offset_x=ox, offset_y=oy)
-            self._history.push(self.document.settings_payload())
-            self._emit_history()
-            self.schedule_preview()
-            self._save_timer.start()
-            return
-        self.edit_session.set_layout_patch(self.current_path, {"offset_x": ox, "offset_y": oy})
-        self._mark_edited(self.current_path)
-        self.schedule_preview()
-        self._emit_summary()
+        # 位置布局功能暂时关闭。
+        return
 
     def apply_edit_session_field(self, field: str, text: str, scale: float | None = None) -> None:
         if not self.current_path:

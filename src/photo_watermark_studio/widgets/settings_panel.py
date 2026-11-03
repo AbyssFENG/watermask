@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -23,8 +24,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from photo_watermark_studio.core.document import ANCHORS, WatermarkDocument
-from photo_watermark_studio.core.settings_store import STYLES, THEMES, coerce_settings
+from photo_watermark_studio.core.document import WatermarkDocument
+from photo_watermark_studio.core.settings_store import STYLES, THEMES, coerce_settings, default_layout
+
+
+class _NoWheelComboBox(QComboBox):
+    """禁止滚轮改选项，避免在属性栏滚动时误触。"""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.ignore()
+
+
+class _NoWheelSlider(QSlider):
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.ignore()
+
+
+class _NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.ignore()
+
 
 _META_FIELDS = (
     ("camera", "相机型号", "show_camera", "camera_text", "camera_scale", "showCameraBox"),
@@ -41,19 +60,6 @@ _FIELD_SCALE_KEYS = {
     "date": "date_scale",
     "gps": "gps_scale",
 }
-
-_ANCHOR_LABELS = {
-    "top_left": "左上",
-    "top_center": "上中",
-    "top_right": "右上",
-    "middle_left": "左中",
-    "center": "居中",
-    "middle_right": "右中",
-    "bottom_left": "左下",
-    "bottom_center": "下中",
-    "bottom_right": "右下",
-}
-
 
 class _Group(QFrame):
     def __init__(self, title: str, expanded: bool = True) -> None:
@@ -148,8 +154,8 @@ class SettingsPanel(QFrame):
         form.setSpacing(4)
 
         # 模板
-        g_template = _Group("模板", True)
-        self.style_combo = QComboBox()
+        g_template = _Group("模板", False)
+        self.style_combo = _NoWheelComboBox()
         self.style_combo.setObjectName("styleCombo")
         self.style_combo.addItems(list(STYLES))
         self.style_combo.currentTextChanged.connect(self._emit)
@@ -157,8 +163,47 @@ class SettingsPanel(QFrame):
         g_template.add(self.style_combo)
         form.addWidget(g_template)
 
+        # 外观（紧跟模板）
+        g_look = _Group("外观", False)
+        self.theme_combo = _NoWheelComboBox()
+        self.theme_combo.setObjectName("themeCombo")
+        self.theme_combo.addItems(list(THEMES))
+        self.theme_combo.currentTextChanged.connect(self._emit)
+        g_look.add(self._label("底栏 / 相框配色"))
+        g_look.add(self.theme_combo)
+        g_look.add(self._label("水印大小"))
+        scale_row = QHBoxLayout()
+        self.scale_slider = _NoWheelSlider(Qt.Orientation.Horizontal)
+        self.scale_slider.setObjectName("scaleSlider")
+        self.scale_slider.setRange(65, 160)
+        self.scale_slider.setValue(100)
+        self.scale_slider.valueChanged.connect(self._on_scale)
+        self.scale_value = QLabel("100%")
+        self.scale_value.setObjectName("ValueLabel")
+        self.scale_value.setMinimumWidth(48)
+        scale_row.addWidget(self.scale_slider, 1)
+        scale_row.addWidget(self.scale_value)
+        g_look.body_layout.addLayout(scale_row)
+        self.opacity_row = QWidget()
+        self.opacity_row.setObjectName("barOpacityRow")
+        opacity_layout = QHBoxLayout(self.opacity_row)
+        opacity_layout.setContentsMargins(0, 0, 0, 0)
+        opacity_layout.setSpacing(8)
+        self.opacity_spin = _NoWheelDoubleSpinBox()
+        self.opacity_spin.setObjectName("barOpacitySpin")
+        self.opacity_spin.setRange(0.15, 1.0)
+        self.opacity_spin.setSingleStep(0.05)
+        self.opacity_spin.setValue(0.72)
+        self.opacity_spin.valueChanged.connect(self._emit)
+        opacity_layout.addWidget(self._label("底栏透明度"))
+        opacity_layout.addWidget(self.opacity_spin)
+        g_look.add(self.opacity_row)
+        form.addWidget(g_look)
+        self.style_combo.currentTextChanged.connect(self._update_opacity_visibility)
+        self._update_opacity_visibility()
+
         # 内容
-        g_content = _Group("内容", True)
+        g_content = _Group("内容", False)
         self.brand_edit = QLineEdit()
         self.brand_edit.setObjectName("brandEdit")
         self.brand_edit.setPlaceholderText("留空则不显示")
@@ -193,7 +238,7 @@ class SettingsPanel(QFrame):
         form.addWidget(g_content)
 
         # 元数据
-        g_meta = _Group("元数据", True)
+        g_meta = _Group("元数据", False)
         g_meta.add(self._label("勾选要显示的项；缺失字段不会伪造"))
         g_meta.add(self._missing_hint)
         checks = QGridLayout()
@@ -216,88 +261,10 @@ class SettingsPanel(QFrame):
         g_meta.add(tip)
         form.addWidget(g_meta)
 
-        # 外观
-        g_look = _Group("外观", True)
-        self.theme_combo = QComboBox()
-        self.theme_combo.setObjectName("themeCombo")
-        self.theme_combo.addItems(list(THEMES))
-        self.theme_combo.currentTextChanged.connect(self._emit)
-        g_look.add(self._label("底栏 / 相框配色"))
-        g_look.add(self.theme_combo)
-        g_look.add(self._label("水印大小"))
-        scale_row = QHBoxLayout()
-        self.scale_slider = QSlider(Qt.Orientation.Horizontal)
-        self.scale_slider.setObjectName("scaleSlider")
-        self.scale_slider.setRange(65, 160)
-        self.scale_slider.setValue(100)
-        self.scale_slider.valueChanged.connect(self._on_scale)
-        self.scale_value = QLabel("100%")
-        self.scale_value.setObjectName("ValueLabel")
-        self.scale_value.setMinimumWidth(48)
-        scale_row.addWidget(self.scale_slider, 1)
-        scale_row.addWidget(self.scale_value)
-        g_look.body_layout.addLayout(scale_row)
-        opacity_row = QHBoxLayout()
-        self.opacity_spin = QDoubleSpinBox()
-        self.opacity_spin.setObjectName("barOpacitySpin")
-        self.opacity_spin.setRange(0.15, 1.0)
-        self.opacity_spin.setSingleStep(0.05)
-        self.opacity_spin.setValue(0.72)
-        self.opacity_spin.valueChanged.connect(self._emit)
-        opacity_row.addWidget(self._label("底栏透明度"))
-        opacity_row.addWidget(self.opacity_spin)
-        g_look.body_layout.addLayout(opacity_row)
-        form.addWidget(g_look)
-
-        # 位置与布局
-        g_layout = _Group("位置与布局", True)
-        self.anchor_combo = QComboBox()
-        self.anchor_combo.setObjectName("anchorCombo")
-        for key in ANCHORS:
-            self.anchor_combo.addItem(_ANCHOR_LABELS.get(key, key), key)
-        self.anchor_combo.currentIndexChanged.connect(self._emit)
-        g_layout.add(self._label("九宫格定位（主要影响极简叠加）"))
-        g_layout.add(self.anchor_combo)
-        margin_row = QHBoxLayout()
-        self.margin_x = QDoubleSpinBox()
-        self.margin_x.setRange(0.0, 0.35)
-        self.margin_x.setSingleStep(0.01)
-        self.margin_x.setDecimals(2)
-        self.margin_x.setObjectName("marginXSpin")
-        self.margin_x.valueChanged.connect(self._emit)
-        self.margin_y = QDoubleSpinBox()
-        self.margin_y.setRange(0.0, 0.35)
-        self.margin_y.setSingleStep(0.01)
-        self.margin_y.setDecimals(2)
-        self.margin_y.setObjectName("marginYSpin")
-        self.margin_y.valueChanged.connect(self._emit)
-        margin_row.addWidget(self._label("边距 X"))
-        margin_row.addWidget(self.margin_x)
-        margin_row.addWidget(self._label("Y"))
-        margin_row.addWidget(self.margin_y)
-        g_layout.body_layout.addLayout(margin_row)
-        offset_row = QHBoxLayout()
-        self.offset_x = QDoubleSpinBox()
-        self.offset_x.setRange(-0.45, 0.45)
-        self.offset_x.setSingleStep(0.01)
-        self.offset_x.setDecimals(2)
-        self.offset_x.setObjectName("offsetXSpin")
-        self.offset_x.valueChanged.connect(self._emit)
-        self.offset_y = QDoubleSpinBox()
-        self.offset_y.setRange(-0.45, 0.45)
-        self.offset_y.setSingleStep(0.01)
-        self.offset_y.setDecimals(2)
-        self.offset_y.setObjectName("offsetYSpin")
-        self.offset_y.valueChanged.connect(self._emit)
-        offset_row.addWidget(self._label("偏移 X"))
-        offset_row.addWidget(self.offset_x)
-        offset_row.addWidget(self._label("Y"))
-        offset_row.addWidget(self.offset_y)
-        g_layout.body_layout.addLayout(offset_row)
-        form.addWidget(g_layout)
+        # 位置与布局：暂关闭（操作有 bug），固定默认底部位置。
 
         # 导出
-        g_export = _Group("导出", True)
+        g_export = _Group("导出", False)
         self.output_label = QLabel("")
         self.output_label.setObjectName("PathLabel")
         self.output_label.setWordWrap(True)
@@ -309,7 +276,7 @@ class SettingsPanel(QFrame):
         g_export.add(self.output_label)
         g_export.add(self.output_button)
         quality_row = QHBoxLayout()
-        self.quality_slider = QSlider(Qt.Orientation.Horizontal)
+        self.quality_slider = _NoWheelSlider(Qt.Orientation.Horizontal)
         self.quality_slider.setObjectName("qualitySlider")
         self.quality_slider.setRange(80, 100)
         self.quality_slider.setValue(95)
@@ -320,7 +287,7 @@ class SettingsPanel(QFrame):
         quality_row.addWidget(self.quality_slider, 1)
         quality_row.addWidget(self.quality_value)
         g_export.body_layout.addLayout(quality_row)
-        self.conflict_combo = QComboBox()
+        self.conflict_combo = _NoWheelComboBox()
         self.conflict_combo.setObjectName("conflictCombo")
         self.conflict_combo.addItem("重名时自动编号", "number")
         self.conflict_combo.addItem("重名时覆盖（需确认）", "overwrite")
@@ -347,11 +314,6 @@ class SettingsPanel(QFrame):
             self.scale_slider,
             self.quality_slider,
             self.opacity_spin,
-            self.anchor_combo,
-            self.margin_x,
-            self.margin_y,
-            self.offset_x,
-            self.offset_y,
             self.conflict_combo,
         ]
 
@@ -365,6 +327,10 @@ class SettingsPanel(QFrame):
         box.setObjectName(object_name)
         box.toggled.connect(self._emit)
         return box
+
+    def _update_opacity_visibility(self, *_args: object) -> None:
+        """底栏透明度仅作用于极简叠加。"""
+        self.opacity_row.setVisible(self.style_combo.currentText() == "极简叠加")
 
     def _emit(self, *_args: object) -> None:
         if not self._loading:
@@ -414,14 +380,8 @@ class SettingsPanel(QFrame):
         self._emit()
 
     def set_layout_offset(self, ox: float, oy: float) -> None:
-        self._loading = True
-        self.offset_x.blockSignals(True)
-        self.offset_y.blockSignals(True)
-        self.offset_x.setValue(float(ox))
-        self.offset_y.setValue(float(oy))
-        self.offset_x.blockSignals(False)
-        self.offset_y.blockSignals(False)
-        self._loading = False
+        # 位置布局功能已关闭，忽略画布拖动回写。
+        return
 
     def set_metadata_placeholders(self, values: dict[str, str] | None) -> None:
         data = values or {}
@@ -477,16 +437,8 @@ class SettingsPanel(QFrame):
             self._emit()
 
     def state(self) -> dict[str, Any]:
-        layout = {
-            "anchor": self.anchor_combo.currentData(),
-            "margin_x": self.margin_x.value(),
-            "margin_y": self.margin_y.value(),
-            "offset_x": self.offset_x.value(),
-            "offset_y": self.offset_y.value(),
-            "bar_opacity": self.opacity_spin.value(),
-            "corner_radius": 0,
-            "blur_radius": 12.0,
-        }
+        layout = default_layout()
+        layout["bar_opacity"] = self.opacity_spin.value()
         data: dict[str, Any] = {
             "style": self.style_combo.currentText(),
             "theme": self.theme_combo.currentText(),
@@ -547,16 +499,10 @@ class SettingsPanel(QFrame):
             self.output_label.setText(self._output_dir)
             self.output_label.setToolTip(self._output_dir)
             self.opacity_spin.setValue(float(layout.get("bar_opacity", 0.72)))
-            self.margin_x.setValue(float(layout.get("margin_x", 0.0)))
-            self.margin_y.setValue(float(layout.get("margin_y", 0.0)))
-            self.offset_x.setValue(float(layout.get("offset_x", 0.0)))
-            self.offset_y.setValue(float(layout.get("offset_y", 0.0)))
-            anchor = str(layout.get("anchor", "bottom_center"))
-            idx = self.anchor_combo.findData(anchor)
-            self.anchor_combo.setCurrentIndex(idx if idx >= 0 else self.anchor_combo.findData("bottom_center"))
             policy = str(data.get("conflict_policy", "number"))
             pidx = self.conflict_combo.findData(policy)
             self.conflict_combo.setCurrentIndex(pidx if pidx >= 0 else 0)
+            self._update_opacity_visibility()
         finally:
             for widget in self._inputs:
                 widget.blockSignals(False)

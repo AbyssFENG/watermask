@@ -38,4 +38,11 @@ class PhotoMetadata:
             "PENTAX": "PENTAX",
             "APPLE": "Apple iPhone",
         }
-        return mapping.get(make.upper(), make.title())
+        key = make.upper()
+        if key in mapping:
+            return mapping[key]
+        # NIKON CORPORATION / Canon Inc. 等：按品牌前缀匹配
+        for known, label in sorted(mapping.items(), key=lambda item: len(item[0]), reverse=True):
+            if key == known or key.startswith(known + " "):
+                return label
+        return make.title()
