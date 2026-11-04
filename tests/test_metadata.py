@@ -5,6 +5,7 @@ import ast
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parents[1] / "src"
@@ -26,6 +27,8 @@ from photo_watermark_studio.core.metadata import (
     _format_focal,
     _format_shutter,
     _gps_to_decimal,
+    _parse_photo_metadata,
+    clear_metadata_cache,
     read_photo_metadata,
 )
 from photo_watermark_studio.core.models import PhotoMetadata
@@ -121,6 +124,27 @@ class ReadMetadataTests(unittest.TestCase):
         self.assertEqual(metadata.iso, "200")
         self.assertEqual(metadata.date, "2024.05.01  12:30:00")
         self.assertEqual(metadata.gps, "30.25000, 120.50000")
+
+    def test_metadata_cache_reuses_same_file(self) -> None:
+        path = self.folder / "cache.jpg"
+        image = Image.new("RGB", (32, 24), (20, 30, 40))
+        exif = image.getexif()
+        exif[271] = "NIKON"
+        exif[272] = "NIKON Z 6"
+        image.save(path, format="JPEG", exif=exif)
+        clear_metadata_cache()
+        first = read_photo_metadata(path)
+        second = read_photo_metadata(path)
+        self.assertEqual(first.camera, "NIKON Z 6")
+        self.assertIs(first, second)
+        with unittest.mock.patch(
+            "photo_watermark_studio.core.metadata._parse_photo_metadata",
+            wraps=_parse_photo_metadata,
+        ) as parse:
+            clear_metadata_cache()
+            read_photo_metadata(path)
+            read_photo_metadata(path)
+            self.assertEqual(parse.call_count, 1)
 
     def test_nikon_corporation_make_not_duplicated(self) -> None:
         path = self.folder / "nikon-corp.jpg"

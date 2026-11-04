@@ -225,7 +225,7 @@ class PhotoListPanel(QFrame):
         h = int(meta.get("height") or 0)
         size = f"{w} × {h}" if w and h else "…"
         if self.view_combo.currentText() == "列表":
-            return f"{name}\n{size} · {status}"
+            return f"{name}\n{size}\n{status}"
         return f"{name}\n{status}"
 
     def _refresh_item_text(self, path: str) -> None:

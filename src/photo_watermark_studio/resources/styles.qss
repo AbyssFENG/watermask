@@ -325,8 +325,9 @@ QLabel#EmptyCanvasLabel[error="true"] {
 }
 
 QGraphicsView#CanvasView {
-    background: #E8ECF2;
-    border: 1px solid #E5EAF1;
+    /* 中性灰底，避免浅色卡片相框与画布融在一起 */
+    background: #8B94A3;
+    border: 1px solid #7A8494;
     border-radius: 10px;
 }
 

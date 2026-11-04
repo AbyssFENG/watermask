@@ -33,6 +33,7 @@ OPTION_KEYS = (
     "caption",
     "scale",
     "logo_path",
+    "show_logo",
     "show_camera",
     "show_lens",
     "show_exif",
@@ -70,6 +71,7 @@ def default_settings() -> dict[str, Any]:
         "caption": "",
         "scale": 1.0,
         "logo_path": "",
+        "show_logo": True,
         "show_camera": True,
         "show_lens": True,
         "show_exif": True,
@@ -126,7 +128,7 @@ def coerce_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
         scale = 1.0
     data["scale"] = min(1.6, max(0.65, scale))
     data["logo_path"] = str(raw.get("logo_path", "") or "")
-    for key in ("show_camera", "show_lens", "show_exif", "show_date", "show_gps", "show_brand_text"):
+    for key in ("show_logo", "show_camera", "show_lens", "show_exif", "show_date", "show_gps", "show_brand_text"):
         data[key] = bool(raw.get(key, base[key]))
     for key in TEXT_KEYS:
         data[key] = str(raw.get(key, "") or "")

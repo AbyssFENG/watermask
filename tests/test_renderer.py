@@ -34,6 +34,7 @@ OPTIONS = {
     "caption": "城市",
     "scale": 1.0,
     "logo_path": "",
+    "show_logo": True,
     "show_camera": True,
     "show_lens": True,
     "show_exif": True,
@@ -64,6 +65,25 @@ class RendererTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
+
+    def test_landscape_and_portrait_share_bar_height(self) -> None:
+        # 同短边：4:3 横图与 3:4 竖图的经典底栏高度应一致。
+        landscape = self.folder / "land_4x3.png"
+        portrait = self.folder / "port_3x4.png"
+        Image.new("RGB", (400, 300), (80, 110, 140)).save(landscape)
+        Image.new("RGB", (300, 400), (80, 110, 140)).save(portrait)
+        opts = {**OPTIONS, "style": "经典底栏", "scale": 1.0}
+        _land, land_hits = render_watermark_with_hits(landscape, opts)
+        _port, port_hits = render_watermark_with_hits(portrait, opts)
+        land_bar = next(hit for hit in land_hits if hit.get("key") == "watermark_bar")
+        port_bar = next(hit for hit in port_hits if hit.get("key") == "watermark_bar")
+        self.assertAlmostEqual(float(land_bar["h"]), float(port_bar["h"]), delta=1.0)
+        overlay_opts = {**OPTIONS, "style": "极简叠加", "scale": 1.0}
+        _lo, lo_hits = render_watermark_with_hits(landscape, overlay_opts)
+        _po, po_hits = render_watermark_with_hits(portrait, overlay_opts)
+        lo_bar = next(hit for hit in lo_hits if hit.get("key") == "watermark_bar")
+        po_bar = next(hit for hit in po_hits if hit.get("key") == "watermark_bar")
+        self.assertAlmostEqual(float(lo_bar["h"]), float(po_bar["h"]), delta=1.0)
 
     def test_three_templates_change_canvas_size(self) -> None:
         overlay = render_watermark(self.source, {**OPTIONS, "style": "极简叠加"})
@@ -130,6 +150,12 @@ class RendererTests(unittest.TestCase):
         self.assertIn("brand", keys)
         brand_hit = next(hit for hit in hits if hit["key"] == "brand")
         self.assertEqual(brand_hit["text"], "Studio Name")
+
+    def test_hidden_logo_keeps_path_but_skips_draw(self) -> None:
+        visible = render_watermark(self.source, {**OPTIONS, "logo_path": str(self.logo), "show_logo": True})
+        hidden = render_watermark(self.source, {**OPTIONS, "logo_path": str(self.logo), "show_logo": False})
+        self.assertEqual(visible.size, hidden.size)
+        self.assertEqual(hidden.mode, "RGB")
 
     def test_themes_logo_and_missing_logo_do_not_crash(self) -> None:
         for theme in ("浅色", "深色", "蓝色", "高斯模糊"):

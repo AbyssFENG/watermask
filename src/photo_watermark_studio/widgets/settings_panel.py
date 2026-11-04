@@ -226,6 +226,9 @@ class SettingsPanel(QFrame):
         self.clear_logo_button.clicked.connect(self.clearLogoRequested)
         logo_row.addWidget(self.logo_button)
         logo_row.addWidget(self.clear_logo_button)
+        self.show_logo = self._check("显示 Logo", "showLogoBox")
+        self.show_logo.setChecked(True)
+        self.show_logo.toggled.connect(self._update_logo_label)
         self.show_brand_text = self._check("Logo 旁显示署名", "showBrandTextBox")
         g_content.add(self._label("品牌 / 摄影署名"))
         g_content.add(self.brand_edit)
@@ -234,6 +237,7 @@ class SettingsPanel(QFrame):
         g_content.add(self._label("Logo"))
         g_content.add(self.logo_label)
         g_content.body_layout.addLayout(logo_row)
+        g_content.add(self.show_logo)
         g_content.add(self.show_brand_text)
         form.addWidget(g_content)
 
@@ -310,12 +314,14 @@ class SettingsPanel(QFrame):
             self.show_exif,
             self.show_date,
             self.show_gps,
+            self.show_logo,
             self.show_brand_text,
             self.scale_slider,
             self.quality_slider,
             self.opacity_spin,
             self.conflict_combo,
         ]
+        self._update_logo_label()
 
     def _label(self, text: str) -> QLabel:
         label = QLabel(text)
@@ -355,21 +361,30 @@ class SettingsPanel(QFrame):
     def _update_logo_label(self) -> None:
         path = self._logo_path
         missing = False
+        has_logo = bool(path)
+        self.show_logo.setEnabled(has_logo)
         if not path:
             self.logo_label.setText("未选择 Logo（支持透明 PNG）")
         else:
             name = Path(path).name
             if Path(path).is_file():
-                self.logo_label.setText(name)
+                text = name
             else:
-                self.logo_label.setText(f"路径失效：{name}")
+                text = f"路径失效：{name}"
                 missing = True
+            if not self.show_logo.isChecked():
+                text = f"{text}（已隐藏）"
+            self.logo_label.setText(text)
         self.logo_label.setProperty("missing", missing)
         self.logo_label.style().unpolish(self.logo_label)
         self.logo_label.style().polish(self.logo_label)
 
     def set_logo_path(self, path: str) -> None:
         self._logo_path = path or ""
+        if self._logo_path:
+            self.show_logo.blockSignals(True)
+            self.show_logo.setChecked(True)
+            self.show_logo.blockSignals(False)
         self._update_logo_label()
         self._emit()
 
@@ -446,6 +461,7 @@ class SettingsPanel(QFrame):
             "caption": self.caption_edit.text(),
             "scale": self.scale_slider.value() / 100,
             "logo_path": self._logo_path,
+            "show_logo": self.show_logo.isChecked(),
             "show_camera": self.show_camera.isChecked(),
             "show_lens": self.show_lens.isChecked(),
             "show_exif": self.show_exif.isChecked(),
@@ -485,6 +501,7 @@ class SettingsPanel(QFrame):
             self.show_exif.setChecked(bool(data["show_exif"]))
             self.show_date.setChecked(bool(data["show_date"]))
             self.show_gps.setChecked(bool(data["show_gps"]))
+            self.show_logo.setChecked(bool(data["show_logo"]))
             self.show_brand_text.setChecked(bool(data["show_brand_text"]))
             for key, _label, _show_key, text_key, scale_key, _check_name in _META_FIELDS:
                 self._field_texts[key] = str(data[text_key])

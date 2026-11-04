@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QImage, QPainter, QPixmap, QTransform, QWheelEvent
+from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPixmap, QTransform, QWheelEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsPixmapItem,
@@ -127,6 +127,8 @@ class CanvasPanel(QFrame):
         root.addWidget(self.tools_bar)
 
         self.scene = QGraphicsScene(self)
+        # 与浅色相框区分的中性灰底（导出不受影响）。
+        self.scene.setBackgroundBrush(QBrush(QColor("#8B94A3")))
         self.view = _ZoomView()
         self.view.setScene(self.scene)
         self.view.setObjectName("CanvasView")

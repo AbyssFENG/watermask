@@ -480,21 +480,35 @@ def render_from_document(source_path: str | Path, document: Any) -> Image.Image:
 
 
 def render_watermark_with_hits(
-    source_path: str | Path, options: dict[str, Any]
+    source_path: str | Path,
+    options: dict[str, Any],
+    *,
+    base_image: Image.Image | None = None,
+    metadata: PhotoMetadata | None = None,
 ) -> tuple[Image.Image, list[dict[str, Any]]]:
-    """Render watermark and return clickable text regions in image coordinates."""
-    with Image.open(source_path) as src:
-        base = ImageOps.exif_transpose(src).convert("RGB")
-        original_exif = src.getexif()
-    del original_exif
+    """Render watermark and return clickable text regions in image coordinates.
+
+    base_image / metadata 供预览路径复用已解码图与缓存 EXIF；导出仍走默认全尺寸打开。
+    """
+    if base_image is not None:
+        base = base_image.convert("RGB")
+        if base is base_image:
+            base = base.copy()
+    else:
+        with Image.open(source_path) as src:
+            base = ImageOps.exif_transpose(src).convert("RGB")
+            original_exif = src.getexif()
+        del original_exif
     w, h = base.size
+    # 短边基准：横竖构图下水印视觉比例一致（与卡片相框相同）。
+    ref = min(w, h)
     theme_name = str(options.get("theme", "浅色"))
     theme = _color_theme(theme_name)
     frosted = _is_frosted_theme(theme_name)
     style = str(options.get("style", "经典底栏"))
     scale_setting = max(0.65, min(1.6, float(options.get("scale", 1.0))))
     shift_x, shift_y = _layout_shift(options, w, h)
-    md = read_photo_metadata(source_path)
+    md = metadata if metadata is not None else read_photo_metadata(source_path)
     brand = str(options.get("brand", "")).strip()
     caption = str(options.get("caption", "")).strip()
     title_segs, detail_segs, extra_segs = _metadata_segment_lines(md, options)
@@ -512,14 +526,17 @@ def render_watermark_with_hits(
     if not line_groups:
         line_groups = [[TextSegment("EXIF 参数暂缺，可添加自定义说明", 1.0)]]
 
-    logo = _load_logo(str(options.get("logo_path", "")), (max(40, int(w * 0.19)), max(28, int(w * 0.055))))
+    logo_path = str(options.get("logo_path", "") or "")
+    if options.get("show_logo", True) is False:
+        logo_path = ""
+    logo = _load_logo(logo_path, (max(52, int(ref * 0.247)), max(36, int(ref * 0.0715))))
     base = base.convert("RGB")
     hits: list[dict[str, Any]] = []
 
     if style == "极简叠加":
         rgba = base.convert("RGBA")
-        # 底栏高度随「水印大小」变化，相机/镜头等字号才能一起变大。
-        band_h = max(74, int(w * 0.092 * scale_setting))
+        # 底栏高度随「水印大小」与短边变化，相机/镜头等字号才能一起变大。
+        band_h = max(96, int(ref * 0.1196 * scale_setting))
         band_top = max(0, min(h - band_h, h - band_h + shift_y))
         if frosted:
             try:
@@ -593,7 +610,7 @@ def render_watermark_with_hits(
     if style == "卡片相框":
         pad = max(22, int(min(w, h) * 0.052))
         # 页脚按原比例再收一截（约减少 1/5），避免底部留白过多。
-        footer_h = max(72, int(min(w, h) * 0.128 * scale_setting))
+        footer_h = max(94, int(min(w, h) * 0.1664 * scale_setting))
         # Logo + 署名纵向叠放时加高页脚，避免挤在一起。
         if logo is not None and brand:
             footer_h = max(footer_h, int(footer_h * 1.28))
@@ -622,7 +639,7 @@ def render_watermark_with_hits(
             d = ImageDraw.Draw(canvas)
         # 卡片为纵向排布：有署名就显示；有 Logo 时署名在 Logo 下方，不再被 elif 吞掉。
         if brand:
-            brand_size = int(min(w, h) * (.028 if logo is not None else .042) * scale_setting)
+            brand_size = int(min(w, h) * (.0364 if logo is not None else .0546) * scale_setting)
             fbrand = _fit_font(d, brand, out_w - pad * 2, brand_size, True, True)
             bb = d.textbbox((0, 0), brand, font=fbrand)
             bx = center_x - (bb[2] - bb[0]) / 2
@@ -631,7 +648,7 @@ def render_watermark_with_hits(
             _append_hit(hits, "brand", brand, hit[0], hit[1], hit[2] - hit[0], hit[3] - hit[1])
             cy += int(fbrand.size * 1.18)
         for idx, segments in enumerate(line_groups[:3]):
-            preferred = int(min(w, h) * (.022 if idx == 0 else .016) * scale_setting)
+            preferred = int(min(w, h) * (.0286 if idx == 0 else .0208) * scale_setting)
             tallest = _draw_segments(
                 d,
                 segments,
@@ -647,7 +664,7 @@ def render_watermark_with_hits(
             cy += int(max(tallest, preferred) * 1.32)
         return canvas, hits
 
-    bar_h = max(74, int(w * .092 * scale_setting))
+    bar_h = max(96, int(ref * .1196 * scale_setting))
     if frosted:
         canvas = Image.new("RGB", (w, h + bar_h))
         canvas.paste(base, (0, 0))

@@ -7,8 +7,6 @@ from typing import Any
 
 from PySide6.QtCore import QCoreApplication, QObject, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QImage
-from PIL import Image, ImageOps
-
 from photo_watermark_studio.core.document import WatermarkDocument
 from photo_watermark_studio.core.edit_session import EditSessionStore
 from photo_watermark_studio.core.export_service import export_image
@@ -26,7 +24,12 @@ from photo_watermark_studio.core.settings_store import (
 from photo_watermark_studio.core import settings_store
 from photo_watermark_studio.widgets.preview_widget import PLACEHOLDER_TEXT
 from photo_watermark_studio.workers.export_worker import CancelToken, ExportRunnable, ExportSignals
-from photo_watermark_studio.workers.preview_worker import PreviewRunnable, PreviewSignals
+from photo_watermark_studio.workers.preview_worker import (
+    PreviewRunnable,
+    PreviewSignals,
+    SourceImageRunnable,
+    SourceImageSignals,
+)
 
 
 class PhotoController(QObject):
@@ -83,6 +86,9 @@ class PhotoController(QObject):
         self._export_token = CancelToken()
         self._active_preview: PreviewRunnable | None = None
         self._active_export: ExportRunnable | None = None
+        self._compare_mode = False
+        self._source_request_id = 0
+        self._source_path = ""
 
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -96,6 +102,8 @@ class PhotoController(QObject):
 
         self._preview_pool = QThreadPool(self)
         self._preview_pool.setMaxThreadCount(1)
+        self._source_pool = QThreadPool(self)
+        self._source_pool.setMaxThreadCount(1)
         self._export_pool = QThreadPool(self)
         self._export_pool.setMaxThreadCount(1)
 
@@ -317,9 +325,12 @@ class PhotoController(QObject):
         self.photo_errors.clear()
         self.current_path = None
         self._request_id += 1
+        self._source_request_id += 1
+        self._source_path = ""
         self._preview_timer.stop()
         self.filesChanged.emit([])
         self.currentChanged.emit("")
+        self.sourceImage.emit(QImage())
         self.metadataHints.emit({})
         self.previewMessage.emit(PLACEHOLDER_TEXT, False)
         self._emit_statuses()
@@ -332,12 +343,21 @@ class PhotoController(QObject):
             return
         self.current_path = cleaned
         self.currentChanged.emit(cleaned or "")
+        self.sourceImage.emit(QImage())
+        self._source_request_id += 1
+        self._source_path = ""
         self._emit_metadata_hints()
         self._emit_summary()
         self._request_id += 1
-        self._preview_timer.stop()
-        if not self._preview_running:
-            self._start_preview(self._request_id)
+        # 短防抖：连点时只渲最后一张，避免排队全量预览。
+        self._preview_timer.start(100)
+        if self._compare_mode:
+            self._request_source_image()
+
+    def set_compare_mode(self, enabled: bool) -> None:
+        self._compare_mode = bool(enabled)
+        if self._compare_mode:
+            self._request_source_image()
 
     def _emit_metadata_hints(self) -> None:
         if not self.current_path or not Path(self.current_path).is_file():
@@ -436,12 +456,14 @@ class PhotoController(QObject):
     def shutdown(self) -> None:
         self._closing = True
         self._request_id += 1
+        self._source_request_id += 1
         self._preview_timer.stop()
         self._save_timer.stop()
         self.save_settings()
         # 保留未导出的单张覆盖，下次可恢复；完整清空留给用户主动清空。
         self._export_token.stop = True
         self._preview_pool.waitForDone()
+        self._source_pool.waitForDone()
         self._export_pool.waitForDone()
         QCoreApplication.processEvents()
 
@@ -461,7 +483,6 @@ class PhotoController(QObject):
                 self.statusChanged.emit("找不到所选照片，可能已被移动或删除。")
             return
         self._preview_running = True
-        self._emit_source_image(self.current_path)
         signals = PreviewSignals(self)
         signals.finished.connect(self._on_preview_finished)
         width, height = self._preview_size
@@ -476,25 +497,31 @@ class PhotoController(QObject):
         self._active_preview = runnable
         self._preview_pool.start(runnable)
 
-    def _emit_source_image(self, path: str) -> None:
-        try:
-            from photo_watermark_studio.workers.preview_worker import PREVIEW_MAX_EDGE, preview_scale_for
-
-            with Image.open(path) as src:
-                image = ImageOps.exif_transpose(src).convert("RGB")
-                scale = preview_scale_for(image.size, PREVIEW_MAX_EDGE)
-                if scale < 1.0:
-                    image = image.resize(
-                        (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
-                        Image.Resampling.LANCZOS,
-                    )
-                data = image.tobytes("raw", "RGB")
-                qimage = QImage(
-                    data, image.width, image.height, image.width * 3, QImage.Format.Format_RGB888
-                ).copy()
-            self.sourceImage.emit(qimage)
-        except Exception:
+    def _request_source_image(self) -> None:
+        if self._closing or not self._compare_mode:
+            return
+        path = self.current_path
+        if not path or not Path(path).exists():
             self.sourceImage.emit(QImage())
+            return
+        if path == self._source_path:
+            return
+        self._source_request_id += 1
+        request_id = self._source_request_id
+        signals = SourceImageSignals(self)
+        signals.finished.connect(self._on_source_finished)
+        self._source_pool.start(SourceImageRunnable(request_id, path, signals))
+
+    def _on_source_finished(self, request_id: int, path: str, image: QImage) -> None:
+        sender = self.sender()
+        if sender is not None:
+            sender.deleteLater()
+        if self._closing or request_id != self._source_request_id:
+            return
+        if path != self.current_path:
+            return
+        self._source_path = path if not image.isNull() else ""
+        self.sourceImage.emit(image)
 
     def _on_preview_finished(
         self,

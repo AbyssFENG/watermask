@@ -236,6 +236,7 @@ class MainWindow(QMainWindow):
         self.controller.previewHits.connect(self._on_preview_hits)
         self.controller.previewMessage.connect(self.preview.show_message)
         self.controller.sourceImage.connect(self.preview.set_source_image)
+        self.preview.compareToggled.connect(self.controller.set_compare_mode)
         self.controller.notice.connect(self._on_notice)
         self.controller.exportRunningChanged.connect(self._on_export_running)
         self.controller.editSessionCleared.connect(self._on_edit_session_cleared)

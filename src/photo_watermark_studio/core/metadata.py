@@ -134,7 +134,24 @@ def _gps_to_decimal(value: Any, ref: Any) -> Optional[float]:
         return None
 
 
-def read_photo_metadata(path: str | Path) -> PhotoMetadata:
+# path → (mtime_ns, size, metadata)；按文件指纹失效。
+_metadata_cache: dict[str, tuple[int, int, PhotoMetadata]] = {}
+_METADATA_CACHE_LIMIT = 128
+
+
+def clear_metadata_cache() -> None:
+    _metadata_cache.clear()
+
+
+def _file_fingerprint(path: Path) -> tuple[str, int, int] | None:
+    try:
+        st = path.stat()
+        return (str(path.resolve()), int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        return None
+
+
+def _parse_photo_metadata(path: Path) -> PhotoMetadata:
     """Read common camera EXIF fields. Missing EXIF is normal and returns empty fields."""
     md = PhotoMetadata()
     try:
@@ -178,4 +195,22 @@ def read_photo_metadata(path: str | Path) -> PhotoMetadata:
     except Exception:
         # Image may be damaged or an unsupported RAW format; the app still allows a custom caption.
         return md
+    return md
+
+
+def read_photo_metadata(path: str | Path) -> PhotoMetadata:
+    """读取 EXIF；同路径且 mtime/size 未变时复用进程内缓存。"""
+    p = Path(path)
+    fp = _file_fingerprint(p)
+    if fp is not None:
+        key, mtime_ns, size = fp
+        hit = _metadata_cache.get(key)
+        if hit is not None and hit[0] == mtime_ns and hit[1] == size:
+            return hit[2]
+    md = _parse_photo_metadata(p)
+    if fp is not None:
+        key, mtime_ns, size = fp
+        _metadata_cache[key] = (mtime_ns, size, md)
+        while len(_metadata_cache) > _METADATA_CACHE_LIMIT:
+            _metadata_cache.pop(next(iter(_metadata_cache)))
     return md
