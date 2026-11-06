@@ -78,6 +78,7 @@ class MainWindow(QMainWindow):
         self._refresh_output_label()
         self.controller.set_preview_size(*self.preview.viewport_size())
         self.controller._emit_summary()
+        self.preview.set_layout_drag_enabled(str(self.controller.document.get("style", "")) == "自定义")
         if self.controller._had_session:
             self.status_label.setText("已恢复上次未完成的单张调整。")
 
@@ -220,6 +221,7 @@ class MainWindow(QMainWindow):
         self.photo_list.resetPhotoRequested.connect(self.controller.reset_photo_overrides)
         self.preview.fieldEditRequested.connect(self._on_field_edit_requested)
         self.preview.fieldChanged.connect(self._on_field_changed)
+        self.preview.fieldPositionChanged.connect(self._on_field_position)
         self.settings.optionsChanged.connect(self._on_settings)
         self.settings.chooseLogoRequested.connect(self._choose_logo)
         self.settings.clearLogoRequested.connect(lambda: self.settings.set_logo_path(""))
@@ -234,6 +236,7 @@ class MainWindow(QMainWindow):
         self.controller.metadataHints.connect(self.settings.set_metadata_placeholders)
         self.controller.previewImage.connect(self._on_preview_image)
         self.controller.previewHits.connect(self._on_preview_hits)
+        self.controller.previewSprites.connect(self._on_preview_sprites)
         self.controller.previewMessage.connect(self.preview.show_message)
         self.controller.sourceImage.connect(self.preview.set_source_image)
         self.preview.compareToggled.connect(self.controller.set_compare_mode)
@@ -245,19 +248,33 @@ class MainWindow(QMainWindow):
         self.controller.historyChanged.connect(self._on_history)
 
     def _on_preview_image(self, image) -> None:
-        self.preview.set_layout_offset(0.0, 0.0)
         self._pending_preview = image
+        self._pending_sprites: list = []
+
+    def _on_preview_sprites(self, sprites: object) -> None:
+        self._pending_sprites = sprites if isinstance(sprites, list) else []
 
     def _on_preview_hits(self, hits: object) -> None:
         image = self._pending_preview
         if image is None:
             return
-        self.preview.set_preview_image(image, hits if isinstance(hits, list) else [])
+        self.preview.set_preview_image(
+            image,
+            hits if isinstance(hits, list) else [],
+            sprites=getattr(self, "_pending_sprites", []),
+        )
+
+    def _on_field_position(self, key: str, x: float, y: float) -> None:
+        # 直连 controller，面板仅静默同步，避免整表 apply_settings。
+        self.controller.apply_field_position(key, x, y)
+        self.settings.set_field_position(key, x, y, emit=False)
 
     def _on_settings(self) -> None:
         state = self.settings.state()
         self.controller.apply_settings(state)
         self._show_output_dir(str(state["output_dir"]))
+        custom = str(state.get("style", "")) == "自定义"
+        self.preview.set_layout_drag_enabled(custom)
 
     def _on_files(self, paths: object) -> None:
         items = [str(path) for path in paths] if isinstance(paths, list) else []
@@ -267,7 +284,6 @@ class MainWindow(QMainWindow):
         self.photo_list.set_current_path(path)
         self.preview.set_photo_token(path)
         self.preview.hide_field_editor()
-        self.preview.set_layout_offset(0.0, 0.0)
 
     def _on_statuses(self, mapping: object) -> None:
         if isinstance(mapping, dict):

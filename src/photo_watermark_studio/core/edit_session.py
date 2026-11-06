@@ -80,11 +80,31 @@ def merge_photo_overrides(
         base_layout = coerce_layout(merged.get("layout") if isinstance(merged.get("layout"), dict) else None)
         base_layout.update({k: layout_override[k] for k in layout_override})
         merged["layout"] = base_layout
-        for key in ("anchor", "margin_x", "margin_y", "offset_x", "offset_y", "bar_opacity", "corner_radius", "blur_radius"):
+        for key in (
+            "anchor",
+            "margin_x",
+            "margin_y",
+            "offset_x",
+            "offset_y",
+            "bar_opacity",
+            "corner_radius",
+            "blur_radius",
+            "field_positions",
+        ):
             if key in base_layout:
                 merged[key] = base_layout[key]
     elif isinstance(merged.get("layout"), dict):
-        for key in ("anchor", "margin_x", "margin_y", "offset_x", "offset_y", "bar_opacity", "corner_radius", "blur_radius"):
+        for key in (
+            "anchor",
+            "margin_x",
+            "margin_y",
+            "offset_x",
+            "offset_y",
+            "bar_opacity",
+            "corner_radius",
+            "blur_radius",
+            "field_positions",
+        ):
             if key in merged["layout"]:
                 merged[key] = merged["layout"][key]
     return merged

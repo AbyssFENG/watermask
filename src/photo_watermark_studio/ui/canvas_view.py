@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPixmap, QTransform, QWheelEvent
+from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap, QTransform, QWheelEvent
 from PySide6.QtWidgets import (
     QFrame,
+    QGraphicsItem,
+    QGraphicsObject,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
@@ -17,14 +19,110 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpinBox,
+    QStyleOptionGraphicsItem,
     QVBoxLayout,
     QWidget,
 )
 
 from photo_watermark_studio.core.coordinate_mapper import CoordinateMapper, ImageSize, ViewRect
-from photo_watermark_studio.ui.watermark_items import HitTextItem, WatermarkBarItem
+from photo_watermark_studio.core.settings_store import FIELD_GRID_STEP, FIELD_POSITION_KEYS
+from photo_watermark_studio.ui.watermark_items import DraggableFieldItem, HitTextItem, WatermarkBarItem
 
 PLACEHOLDER_TEXT = "添加一张照片\n开始设计你的专属水印"
+
+
+class _NineGridGuideItem(QGraphicsObject):
+    """拖动字段时：整画布 5% 细网格，1/3·2/3 四根加粗（cosmetic）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._canvas = QRectF()
+        self.setZValue(40)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setVisible(False)
+
+    def set_canvas_rect(self, rect: QRectF) -> None:
+        next_canvas = QRectF(rect)
+        if next_canvas == self._canvas:
+            return
+        self.prepareGeometryChange()
+        self._canvas = next_canvas
+        self.update()
+
+    def boundingRect(self) -> QRectF:
+        return self._canvas
+
+    @staticmethod
+    def _draw_lines(
+        painter: QPainter,
+        lines: list[tuple[float, float, float, float]],
+        *,
+        shadow_color: QColor,
+        accent_color: QColor,
+        shadow_width: float,
+        accent_width: float,
+        dashed: bool,
+    ) -> None:
+        shadow = QPen(shadow_color, shadow_width)
+        shadow.setCosmetic(True)
+        painter.setPen(shadow)
+        for x1, y1, x2, y2 in lines:
+            painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+        accent = QPen(accent_color, accent_width)
+        accent.setCosmetic(True)
+        if dashed:
+            accent.setStyle(Qt.PenStyle.DashLine)
+            accent.setDashPattern([8, 5])
+        painter.setPen(accent)
+        for x1, y1, x2, y2 in lines:
+            painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+
+    def paint(self, painter, option: QStyleOptionGraphicsItem, widget: QWidget | None = None) -> None:
+        if self._canvas.isEmpty():
+            return
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        r = self._canvas
+        step = max(0.01, float(FIELD_GRID_STEP))
+
+        # 细网格：整画布；靠近 1/3、2/3 的留给加粗线。
+        fine: list[tuple[float, float, float, float]] = []
+        n = int(round(1.0 / step))
+        for i in range(1, n):
+            t = i * step
+            if t >= 0.999:
+                break
+            if abs(t - 1 / 3) < 0.02 or abs(t - 2 / 3) < 0.02:
+                continue
+            x = r.left() + r.width() * t
+            y = r.top() + r.height() * t
+            fine.append((x, r.top(), x, r.bottom()))
+            fine.append((r.left(), y, r.right(), y))
+        self._draw_lines(
+            painter,
+            fine,
+            shadow_color=QColor(0, 0, 0, 90),
+            accent_color=QColor(255, 255, 255, 130),
+            shadow_width=1.5,
+            accent_width=1.25,
+            dashed=False,
+        )
+
+        # 同一坐标系上加粗 1/3、2/3 四根线。
+        thirds: list[tuple[float, float, float, float]] = []
+        for frac in (1 / 3, 2 / 3):
+            x = r.left() + r.width() * frac
+            y = r.top() + r.height() * frac
+            thirds.append((x, r.top(), x, r.bottom()))
+            thirds.append((r.left(), y, r.right(), y))
+        self._draw_lines(
+            painter,
+            thirds,
+            shadow_color=QColor(0, 0, 0, 180),
+            accent_color=QColor(255, 255, 255, 230),
+            shadow_width=2.25,
+            accent_width=1.75,
+            dashed=True,
+        )
 
 
 class _ZoomView(QGraphicsView):
@@ -74,7 +172,8 @@ class CanvasPanel(QFrame):
     viewportResized = Signal()
     fieldEditRequested = Signal(str)
     fieldChanged = Signal(str, str, object)
-    layoutOffsetChanged = Signal(float, float)
+    layoutOffsetChanged = Signal(float, float)  # 兼容旧接线；自定义不再使用
+    fieldPositionChanged = Signal(str, float, float)
     compareToggled = Signal(bool)
 
     def __init__(self) -> None:
@@ -166,6 +265,7 @@ class CanvasPanel(QFrame):
         self.tip = QLabel("修改写入当前照片覆盖；可撤销。预览为高分辨率，可放大查看细节。")
         self.tip.setObjectName("MutedLabel")
         self.tip.setWordWrap(True)
+        self._tip_default = self.tip.text()
         root.addWidget(self.editor)
         root.addWidget(self.tip)
 
@@ -176,18 +276,25 @@ class CanvasPanel(QFrame):
         self._bar_item = WatermarkBarItem()
         self._bar_item.setVisible(False)
         self.scene.addItem(self._bar_item)
-        self._hit_items: list[HitTextItem] = []
+        self._guide_item = _NineGridGuideItem()
+        self.scene.addItem(self._guide_item)
+        self._hit_items: list[QGraphicsItem] = []
         self._editor_key = ""
         self._compare = False
         self._raw_image: QImage | None = None
         self._watermark_image: QImage | None = None
         self._hits: list[dict[str, Any]] = []
         self._image_size = ImageSize(1, 1)
-        self._layout_offset = (0.0, 0.0)
-        self._suppress_move = False
         self._has_image = False
         self._fit_mode = True
         self._photo_token = ""
+        self._allow_field_drag = False
+        self._pending_drag_image: QImage | None = None
+        self._pending_drag_hits: list[dict[str, Any]] = []
+        self._view_drag_mode = self.view.dragMode()
+        self._field_dragging = False
+        self._sprites: list[dict[str, Any]] = []
+        self._pending_drag_sprites: list[dict[str, Any]] = []
 
         self.fit_button.clicked.connect(self.fit_in_view)
         self.one_button.clicked.connect(self.zoom_100)
@@ -197,7 +304,6 @@ class CanvasPanel(QFrame):
         self.view.scaleChanged.connect(self._on_scale_label)
         self.view.userZoomed.connect(self._on_user_zoomed)
         self.view.viewportResized.connect(self._on_viewport_resized)
-        self._bar_item.moved.connect(self._on_bar_moved)
         self.editor_text.textEdited.connect(self._emit_editor)
         self.editor_scale.valueChanged.connect(self._emit_editor)
         self.editor_close.clicked.connect(self.hide_field_editor)
@@ -217,6 +323,7 @@ class CanvasPanel(QFrame):
         self.editor.setVisible(False)
         self._photo_item.setPixmap(QPixmap())
         self._bar_item.setVisible(False)
+        self._guide_item.setVisible(False)
         self._clear_hits()
         self._has_image = False
         self._photo_token = ""
@@ -228,7 +335,24 @@ class CanvasPanel(QFrame):
         self.empty_label.style().polish(self.empty_label)
 
     def set_layout_offset(self, ox: float, oy: float) -> None:
-        self._layout_offset = (float(ox), float(oy))
+        """兼容旧接口；字段级拖动不再使用整框偏移。"""
+        return
+
+    def set_layout_drag_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._allow_field_drag:
+            self._update_tip()
+            return
+        self._allow_field_drag = enabled
+        self._update_tip()
+        if self._has_image and not self._compare and not self._field_dragging:
+            self._rebuild_overlays(True)
+
+    def _update_tip(self) -> None:
+        if self._allow_field_drag:
+            self.tip.setText("自定义模式：拖动字段实时跟手，松手吸附网格。空白处拖动画布。")
+        else:
+            self.tip.setText(self._tip_default)
 
     def set_photo_token(self, token: str) -> None:
         """换图时传入路径，用于决定是否重置适应窗口。"""
@@ -237,9 +361,21 @@ class CanvasPanel(QFrame):
             self._photo_token = token
             self._fit_mode = True
 
-    def set_preview_image(self, image: QImage, hits: list[dict[str, Any]] | None = None) -> None:
+    def set_preview_image(
+        self,
+        image: QImage,
+        hits: list[dict[str, Any]] | None = None,
+        *,
+        sprites: list[dict[str, Any]] | None = None,
+    ) -> None:
         if image.isNull():
             self.show_message(PLACEHOLDER_TEXT, False)
+            return
+        if self._field_dragging:
+            # 拖动中只缓存结果，松手后再套用，避免框跳回。
+            self._pending_drag_image = QImage(image)
+            self._pending_drag_hits = list(hits or [])
+            self._pending_drag_sprites = list(sprites or [])
             return
         keep_view = self._has_image and not self._fit_mode
         center = self.view.mapToScene(self.view.viewport().rect().center()) if keep_view else None
@@ -247,6 +383,7 @@ class CanvasPanel(QFrame):
 
         self._watermark_image = QImage(image)
         self._hits = list(hits or [])
+        self._sprites = list(sprites or [])
         self.empty_label.setVisible(False)
         self.tools_bar.setVisible(True)
         self.tip.setVisible(True)
@@ -281,30 +418,61 @@ class CanvasPanel(QFrame):
     def _rebuild_overlays(self, show_watermark: bool) -> None:
         self._clear_hits()
         self._bar_item.setVisible(False)
+        self._guide_item.setVisible(False)
         if not show_watermark:
             return
+        view = ViewRect(0, 0, float(self._image_size.width), float(self._image_size.height))
+        mapper = CoordinateMapper(self._image_size, view)
+        canvas_rect = QRectF(0, 0, float(self._image_size.width), float(self._image_size.height))
+        # 整画布细网格；1/3·2/3 四根加粗。
+        self._guide_item.set_canvas_rect(canvas_rect)
+
+        if self._allow_field_drag:
+            # 自定义双层：底图无字段；字段用透明精灵图层跟手拖动。
+            sprite_by_key = {
+                str(s.get("key", "")): s for s in self._sprites if str(s.get("key", ""))
+            }
+            for hit in self._hits:
+                key = str(hit.get("key", ""))
+                if key not in FIELD_POSITION_KEYS:
+                    continue
+                spr = sprite_by_key.get(key)
+                if spr is not None:
+                    x, y = float(spr.get("x", 0)), float(spr.get("y", 0))
+                    w, h = float(spr.get("w", 8)), float(spr.get("h", 8))
+                else:
+                    x, y, w, h = mapper.hit_to_scene(hit)
+                item = DraggableFieldItem(
+                    key,
+                    hit,
+                    QRectF(x, y, max(8, w), max(8, h)),
+                    canvas_rect=canvas_rect,
+                    on_activate=self._on_hit,
+                )
+                if spr is not None:
+                    qimg = spr.get("image")
+                    if isinstance(qimg, QImage) and not qimg.isNull():
+                        item.set_content_pixmap(QPixmap.fromImage(qimg))
+                item.positionCommitted.connect(self._on_field_position)
+                item.dragStarted.connect(self._on_field_drag_started)
+                item.dragFinished.connect(self._on_field_drag_finished)
+                self.scene.addItem(item)
+                self._hit_items.append(item)
+            return
+
         bar_hit = None
         for hit in self._hits:
             if hit.get("key") == "watermark_bar":
                 bar_hit = hit
                 break
-        view = ViewRect(0, 0, float(self._image_size.width), float(self._image_size.height))
-        mapper = CoordinateMapper(self._image_size, view)
         if bar_hit is not None:
             x, y, w, h = mapper.hit_to_scene(bar_hit)
-            self._suppress_move = True
-            # 位置拖动暂关闭，底栏仅作选中/命中辅助，不可拖移。
             self._bar_item.set_geometry(QRectF(x, y, w, h), locked=True)
-            self._bar_item.set_mapper_context(
-                (float(self._image_size.width), float(self._image_size.height)),
-                (mapper.scale_x, mapper.scale_y),
-                self._layout_offset,
-            )
             self._bar_item.setVisible(True)
-            self._suppress_move = False
+
         for hit in self._hits:
             key = str(hit.get("key", ""))
-            if not key or key == "watermark_bar":
+            if not key or key in ("watermark_bar", "photo_content"):
                 continue
             x, y, w, h = mapper.hit_to_scene(hit)
             item = HitTextItem(key, hit, QRectF(x, y, max(8, w), max(8, h)), on_activate=self._on_hit)
@@ -319,11 +487,33 @@ class CanvasPanel(QFrame):
     def _on_hit(self, key: str, payload: dict[str, Any]) -> None:
         self.fieldEditRequested.emit(key)
 
-    def _on_bar_moved(self, nx: float, ny: float) -> None:
-        if self._suppress_move:
-            return
-        self._layout_offset = (nx, ny)
-        self.layoutOffsetChanged.emit(nx, ny)
+    def _on_field_position(self, key: str, nx: float, ny: float) -> None:
+        self.fieldPositionChanged.emit(key, nx, ny)
+
+    def _on_field_drag_started(self) -> None:
+        self._field_dragging = True
+        self._view_drag_mode = self.view.dragMode()
+        self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self._guide_item.setVisible(True)
+        sender = self.sender()
+        if isinstance(sender, DraggableFieldItem):
+            sender.setZValue(60)
+
+    def _on_field_drag_finished(self) -> None:
+        self._field_dragging = False
+        self._guide_item.setVisible(False)
+        self.view.setDragMode(self._view_drag_mode)
+        sender = self.sender()
+        if isinstance(sender, DraggableFieldItem):
+            sender.setZValue(45)
+        pending = self._pending_drag_image
+        hits = self._pending_drag_hits
+        sprites = self._pending_drag_sprites
+        self._pending_drag_image = None
+        self._pending_drag_hits = []
+        self._pending_drag_sprites = []
+        if pending is not None and not pending.isNull():
+            self.set_preview_image(pending, hits, sprites=sprites)
 
     def _on_compare(self, checked: bool) -> None:
         self._compare = checked

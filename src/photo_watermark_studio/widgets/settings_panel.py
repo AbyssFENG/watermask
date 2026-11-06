@@ -14,8 +14,10 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -25,7 +27,18 @@ from PySide6.QtWidgets import (
 )
 
 from photo_watermark_studio.core.document import WatermarkDocument
-from photo_watermark_studio.core.settings_store import STYLES, THEMES, coerce_settings, default_layout
+from photo_watermark_studio.core.settings_store import (
+    BUILTIN_STYLES,
+    FIELD_POSITION_KEYS,
+    STYLES,
+    THEMES,
+    coerce_field_positions,
+    coerce_settings,
+    default_layout,
+    effective_style,
+    snap_field_position,
+)
+from photo_watermark_studio.core import template_store
 
 
 class _NoWheelComboBox(QComboBox):
@@ -106,6 +119,8 @@ class SettingsPanel(QFrame):
         self._loading = False
         self._logo_path = ""
         self._output_dir = ""
+        self._field_positions: dict[str, dict[str, float]] = {}
+        self._templates_path = template_store.default_templates_path()
         self._placeholders: dict[str, str] = {
             "camera": "",
             "lens": "",
@@ -158,9 +173,49 @@ class SettingsPanel(QFrame):
         self.style_combo = _NoWheelComboBox()
         self.style_combo.setObjectName("styleCombo")
         self.style_combo.addItems(list(STYLES))
-        self.style_combo.currentTextChanged.connect(self._emit)
+        self.style_combo.currentTextChanged.connect(self._on_style_changed)
         g_template.add(self._label("水印模板"))
         g_template.add(self.style_combo)
+        self.base_style_row = QWidget()
+        base_col = QVBoxLayout(self.base_style_row)
+        base_col.setContentsMargins(0, 0, 0, 0)
+        base_col.setSpacing(4)
+        self.base_style_combo = _NoWheelComboBox()
+        self.base_style_combo.setObjectName("baseStyleCombo")
+        self.base_style_combo.addItems(list(BUILTIN_STYLES))
+        self.base_style_combo.currentTextChanged.connect(self._update_style_dependent_ui)
+        self.base_style_combo.currentTextChanged.connect(self._emit)
+        base_col.addWidget(self._label("自定义底版"))
+        base_col.addWidget(self.base_style_combo)
+        g_template.add(self.base_style_row)
+        g_template.add(self._label("用户模板"))
+        self.user_template_combo = _NoWheelComboBox()
+        self.user_template_combo.setObjectName("userTemplateCombo")
+        g_template.add(self.user_template_combo)
+        tpl_row = QHBoxLayout()
+        self.tpl_apply_btn = QPushButton("应用")
+        self.tpl_apply_btn.setProperty("role", "soft")
+        self.tpl_apply_btn.clicked.connect(self._apply_user_template)
+        self.tpl_save_btn = QPushButton("保存当前")
+        self.tpl_save_btn.setProperty("role", "soft")
+        self.tpl_save_btn.clicked.connect(self._save_user_template)
+        self.tpl_save_as_btn = QPushButton("另存为")
+        self.tpl_save_as_btn.setProperty("role", "soft")
+        self.tpl_save_as_btn.clicked.connect(self._save_as_user_template)
+        tpl_row.addWidget(self.tpl_apply_btn)
+        tpl_row.addWidget(self.tpl_save_btn)
+        tpl_row.addWidget(self.tpl_save_as_btn)
+        g_template.body_layout.addLayout(tpl_row)
+        tpl_row2 = QHBoxLayout()
+        self.tpl_rename_btn = QPushButton("重命名")
+        self.tpl_rename_btn.setProperty("role", "soft")
+        self.tpl_rename_btn.clicked.connect(self._rename_user_template)
+        self.tpl_delete_btn = QPushButton("删除")
+        self.tpl_delete_btn.setProperty("role", "soft")
+        self.tpl_delete_btn.clicked.connect(self._delete_user_template)
+        tpl_row2.addWidget(self.tpl_rename_btn)
+        tpl_row2.addWidget(self.tpl_delete_btn)
+        g_template.body_layout.addLayout(tpl_row2)
         form.addWidget(g_template)
 
         # 外观（紧跟模板）
@@ -199,8 +254,8 @@ class SettingsPanel(QFrame):
         opacity_layout.addWidget(self.opacity_spin)
         g_look.add(self.opacity_row)
         form.addWidget(g_look)
-        self.style_combo.currentTextChanged.connect(self._update_opacity_visibility)
-        self._update_opacity_visibility()
+        self._refresh_user_templates()
+        self._update_style_dependent_ui()
 
         # 内容
         g_content = _Group("内容", False)
@@ -306,6 +361,7 @@ class SettingsPanel(QFrame):
 
         self._inputs = [
             self.style_combo,
+            self.base_style_combo,
             self.theme_combo,
             self.brand_edit,
             self.caption_edit,
@@ -322,6 +378,7 @@ class SettingsPanel(QFrame):
             self.conflict_combo,
         ]
         self._update_logo_label()
+        self._update_style_dependent_ui()
 
     def _label(self, text: str) -> QLabel:
         label = QLabel(text)
@@ -334,13 +391,130 @@ class SettingsPanel(QFrame):
         box.toggled.connect(self._emit)
         return box
 
-    def _update_opacity_visibility(self, *_args: object) -> None:
-        """底栏透明度仅作用于极简叠加。"""
-        self.opacity_row.setVisible(self.style_combo.currentText() == "极简叠加")
+    def _on_style_changed(self, *_args: object) -> None:
+        self._update_style_dependent_ui()
+        self._emit()
+
+    def _update_style_dependent_ui(self, *_args: object) -> None:
+        custom = self.style_combo.currentText() == "自定义"
+        self.base_style_row.setVisible(custom)
+        # 底栏透明度：极简叠加，或自定义且底版为极简。
+        eff = effective_style(
+            {
+                "style": self.style_combo.currentText(),
+                "base_style": self.base_style_combo.currentText(),
+            }
+        )
+        self.opacity_row.setVisible(eff == "极简叠加")
 
     def _emit(self, *_args: object) -> None:
         if not self._loading:
             self.optionsChanged.emit()
+
+    def _selected_template_id(self) -> str:
+        return str(self.user_template_combo.currentData() or "")
+
+    def _refresh_user_templates(self, select_id: str | None = None) -> None:
+        current = select_id or self._selected_template_id()
+        self.user_template_combo.blockSignals(True)
+        self.user_template_combo.clear()
+        self.user_template_combo.addItem("（未选择）", "")
+        for entry in template_store.list_templates(self._templates_path):
+            self.user_template_combo.addItem(str(entry["name"]), str(entry["id"]))
+        idx = self.user_template_combo.findData(current)
+        self.user_template_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.user_template_combo.blockSignals(False)
+
+    def _prompt_template_name(self, title: str, default: str = "") -> str | None:
+        text, ok = QInputDialog.getText(self, title, "模板名称：", text=default)
+        if not ok:
+            return None
+        name = str(text or "").strip()
+        if not name:
+            QMessageBox.information(self, "提示", "模板名称不能为空。")
+            return None
+        return name
+
+    def _save_user_template(self) -> None:
+        tid = self._selected_template_id()
+        if tid:
+            entry = template_store.get_template(tid, self._templates_path)
+            name = str(entry["name"]) if entry else ""
+        else:
+            name = self._prompt_template_name("保存当前模板") or ""
+            if not name:
+                return
+        try:
+            saved = template_store.save_template(
+                name,
+                self.state(),
+                template_id=tid or None,
+                path=self._templates_path,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "无法保存", str(exc))
+            return
+        self._refresh_user_templates(str(saved["id"]))
+
+    def _save_as_user_template(self) -> None:
+        name = self._prompt_template_name("另存为模板")
+        if not name:
+            return
+        try:
+            saved = template_store.save_template(name, self.state(), path=self._templates_path)
+        except ValueError as exc:
+            QMessageBox.warning(self, "无法保存", str(exc))
+            return
+        self._refresh_user_templates(str(saved["id"]))
+
+    def _apply_user_template(self) -> None:
+        tid = self._selected_template_id()
+        if not tid:
+            QMessageBox.information(self, "提示", "请先选择一个用户模板。")
+            return
+        entry = template_store.get_template(tid, self._templates_path)
+        if entry is None:
+            QMessageBox.warning(self, "提示", "模板不存在或已被删除。")
+            self._refresh_user_templates()
+            return
+        merged = dict(self.state())
+        merged.update(entry["settings"])
+        # 保留当前导出目录 / 浏览目录
+        merged["output_dir"] = self._output_dir
+        self.set_state(merged)
+        self._emit()
+
+    def _rename_user_template(self) -> None:
+        tid = self._selected_template_id()
+        if not tid:
+            QMessageBox.information(self, "提示", "请先选择一个用户模板。")
+            return
+        entry = template_store.get_template(tid, self._templates_path)
+        if entry is None:
+            self._refresh_user_templates()
+            return
+        name = self._prompt_template_name("重命名模板", str(entry["name"]))
+        if not name:
+            return
+        try:
+            template_store.rename_template(tid, name, self._templates_path)
+        except (ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "无法重命名", str(exc))
+            return
+        self._refresh_user_templates(tid)
+
+    def _delete_user_template(self) -> None:
+        tid = self._selected_template_id()
+        if not tid:
+            QMessageBox.information(self, "提示", "请先选择一个用户模板。")
+            return
+        entry = template_store.get_template(tid, self._templates_path)
+        label = str(entry["name"]) if entry else "该模板"
+        answer = QMessageBox.question(self, "删除模板", f"确定删除「{label}」？")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        template_store.delete_template(tid, self._templates_path)
+        self._refresh_user_templates()
 
     def _on_brand_changed(self, *_args: object) -> None:
         self._field_texts["brand"] = self.brand_edit.text()
@@ -395,8 +569,26 @@ class SettingsPanel(QFrame):
         self._emit()
 
     def set_layout_offset(self, ox: float, oy: float) -> None:
-        # 位置布局功能已关闭，忽略画布拖动回写。
+        """兼容旧接口；整框偏移已废弃。"""
         return
+
+    def set_field_position(self, key: str, x: float, y: float, *, emit: bool = True) -> None:
+        name = str(key or "").strip()
+        if name not in FIELD_POSITION_KEYS:
+            return
+        try:
+            nx, ny = snap_field_position(float(x), float(y))
+        except (TypeError, ValueError):
+            return
+        current = self._field_positions.get(name) or {}
+        if (
+            abs(float(current.get("x", -1)) - nx) < 1e-6
+            and abs(float(current.get("y", -1)) - ny) < 1e-6
+        ):
+            return
+        self._field_positions[name] = {"x": nx, "y": ny}
+        if emit and self.style_combo.currentText() == "自定义" and not self._loading:
+            self._emit()
 
     def set_metadata_placeholders(self, values: dict[str, str] | None) -> None:
         data = values or {}
@@ -454,8 +646,15 @@ class SettingsPanel(QFrame):
     def state(self) -> dict[str, Any]:
         layout = default_layout()
         layout["bar_opacity"] = self.opacity_spin.value()
+        # 切走自定义不清空，再切回可恢复。
+        layout["field_positions"] = {
+            key: {"x": float(pos["x"]), "y": float(pos["y"])}
+            for key, pos in self._field_positions.items()
+            if isinstance(pos, dict)
+        }
         data: dict[str, Any] = {
             "style": self.style_combo.currentText(),
+            "base_style": self.base_style_combo.currentText(),
             "theme": self.theme_combo.currentText(),
             "brand": self.brand_edit.text(),
             "caption": self.caption_edit.text(),
@@ -490,6 +689,8 @@ class SettingsPanel(QFrame):
         try:
             style_index = self.style_combo.findText(str(data["style"]))
             self.style_combo.setCurrentIndex(style_index if style_index >= 0 else 0)
+            base_index = self.base_style_combo.findText(str(data.get("base_style", "经典底栏")))
+            self.base_style_combo.setCurrentIndex(base_index if base_index >= 0 else 0)
             theme_index = self.theme_combo.findText(str(data["theme"]))
             self.theme_combo.setCurrentIndex(theme_index if theme_index >= 0 else 0)
             self.brand_edit.setText(str(data["brand"]))
@@ -516,10 +717,11 @@ class SettingsPanel(QFrame):
             self.output_label.setText(self._output_dir)
             self.output_label.setToolTip(self._output_dir)
             self.opacity_spin.setValue(float(layout.get("bar_opacity", 0.72)))
+            self._field_positions = coerce_field_positions(layout.get("field_positions"))
             policy = str(data.get("conflict_policy", "number"))
             pidx = self.conflict_combo.findData(policy)
             self.conflict_combo.setCurrentIndex(pidx if pidx >= 0 else 0)
-            self._update_opacity_visibility()
+            self._update_style_dependent_ui()
         finally:
             for widget in self._inputs:
                 widget.blockSignals(False)

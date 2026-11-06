@@ -11,6 +11,11 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from photo_watermark_studio.core.metadata import read_photo_metadata
 from photo_watermark_studio.core.models import PhotoMetadata
+from photo_watermark_studio.core.settings_store import (
+    default_field_positions,
+    effective_style,
+    is_custom_style,
+)
 
 
 def _needs_cjk(text: str) -> bool:
@@ -377,6 +382,26 @@ def _append_hit(
     )
 
 
+def _draw_text_with_outline(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[float, float],
+    text: str,
+    font: ImageFont.ImageFont,
+    fill: tuple[int, ...],
+    outline: tuple[int, ...] = (0, 0, 0, 160),
+    stroke: int = 1,
+) -> None:
+    """1px 描边，无色块底，保证浅色图上也看得清。"""
+    x, y = xy
+    if stroke > 0:
+        for dx in range(-stroke, stroke + 1):
+            for dy in range(-stroke, stroke + 1):
+                if dx == 0 and dy == 0:
+                    continue
+                draw.text((x + dx, y + dy), text, font=font, fill=outline)
+    draw.text((x, y), text, font=font, fill=fill)
+
+
 def _draw_segments(
     draw: ImageDraw.ImageDraw,
     segments: list[TextSegment],
@@ -389,6 +414,7 @@ def _draw_segments(
     align: str,
     anchor_x: int,
     hits: list[dict[str, Any]] | None = None,
+    outline: bool = False,
 ) -> int:
     """Draw a segmented line. Returns the tallest font size used."""
     fitted = _fit_segment_fonts(draw, segments, max_width, preferred, bold)
@@ -412,7 +438,10 @@ def _draw_segments(
         x = float(anchor_x)
     tallest = 9
     for text, font, width, key in pieces:
-        draw.text((x, y), text, font=font, fill=fill)
+        if outline:
+            _draw_text_with_outline(draw, (x, y), text, font, fill)
+        else:
+            draw.text((x, y), text, font=font, fill=fill)
         font_size = int(getattr(font, "size", 9) or 9)
         tallest = max(tallest, font_size)
         if hits is not None and key:
@@ -479,17 +508,248 @@ def render_from_document(source_path: str | Path, document: Any) -> Image.Image:
     return render_watermark(source_path, options)
 
 
-def render_watermark_with_hits(
+def _freeform_field_items(
+    md: PhotoMetadata, options: dict[str, Any], brand: str, caption: str
+) -> list[tuple[str, str, float, bool]]:
+    """自定义模式下的独立字段列表：(key, text, scale, bold)。"""
+    items: list[tuple[str, str, float, bool]] = []
+    if brand:
+        items.append(("brand", brand, 1.0, True))
+    if options.get("show_camera"):
+        camera = _override_or_exif(options.get("camera_text"), md.camera)
+        if camera:
+            items.append(("camera", camera, _field_scale(options, "camera_scale"), True))
+    if options.get("show_lens"):
+        lens = _override_or_exif(options.get("lens_text"), md.lens)
+        if lens:
+            items.append(("lens", lens, _field_scale(options, "lens_scale"), False))
+    if options.get("show_exif"):
+        custom = str(options.get("exif_text", "") or "").strip()
+        exposure = custom if custom else format_exposure_line(md)
+        if exposure:
+            items.append(("exif", exposure, _field_scale(options, "exif_scale"), False))
+    if options.get("show_date"):
+        date = _override_or_exif(options.get("date_text"), md.date)
+        if date:
+            items.append(("date", date, _field_scale(options, "date_scale"), False))
+    if options.get("show_gps"):
+        gps = _override_or_exif(options.get("gps_text"), md.gps)
+        if gps:
+            items.append(("gps", gps, _field_scale(options, "gps_scale"), False))
+    if caption:
+        items.append(("caption", caption, 1.0, False))
+    return items
+
+
+def _resolve_field_xy(
+    key: str,
+    positions: dict[str, dict[str, float]],
+    defaults: dict[str, dict[str, float]],
+) -> tuple[float, float]:
+    pos = positions.get(key) or defaults.get(key) or {"x": 0.5, "y": 0.8}
+    try:
+        return float(pos["x"]), float(pos["y"])
+    except (KeyError, TypeError, ValueError):
+        return 0.5, 0.8
+
+
+def _make_text_sprite(
+    text: str,
+    font: ImageFont.ImageFont,
+    fill: tuple[int, ...],
+    *,
+    use_outline: bool,
+) -> Image.Image:
+    """透明底字段精灵：仅文字（可选描边），不含照片像素。"""
+    probe = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+    d = ImageDraw.Draw(probe)
+    bb = d.textbbox((0, 0), text, font=font)
+    tw = max(1, bb[2] - bb[0])
+    th = max(1, bb[3] - bb[1])
+    pad = 2 if use_outline else 1
+    spr_w = tw + pad * 2
+    spr_h = th + pad * 2
+    spr = Image.new("RGBA", (spr_w, spr_h), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(spr)
+    dx = pad - bb[0]
+    dy = pad - bb[1]
+    rgba_fill = fill if len(fill) == 4 else (*fill[:3], 255)
+    if use_outline:
+        _draw_text_with_outline(sd, (dx, dy), text, font, rgba_fill)
+    else:
+        sd.text((dx, dy), text, font=font, fill=rgba_fill)
+    return spr
+
+
+def render_custom_freeform_layers(
+    base: Image.Image,
+    options: dict[str, Any],
+    md: PhotoMetadata,
+    brand: str,
+    caption: str,
+    logo: Image.Image | None,
+    theme: dict[str, tuple[int, int, int]],
+    frosted: bool,
+    scale_setting: float,
+    ref: int,
+) -> dict[str, Any]:
+    """自定义双层：base_layer（无字段）+ RGBA sprites + composite。"""
+    base_style = effective_style(options)
+    w, h = base.size
+    positions_raw = options.get("field_positions")
+    if not isinstance(positions_raw, dict):
+        positions_raw = {}
+    defaults = default_field_positions()
+    positions = {**defaults, **{k: v for k, v in positions_raw.items() if isinstance(v, dict)}}
+
+    pad = 0
+    photo_origin = (0, 0)
+    out_w, out_h = w, h
+    if base_style == "卡片相框":
+        pad = max(22, int(ref * 0.052))
+        footer_h = max(40, int(ref * 0.08))
+        out_w = w + 2 * pad
+        out_h = h + 2 * pad + footer_h
+        bg = theme["outer"]
+        if frosted:
+            canvas = _frosted_frame(base, (out_w, out_h), radius=max(16.0, pad * 1.4))
+        else:
+            canvas = Image.new("RGB", (out_w, out_h), bg)
+        shadow = Image.new("RGBA", (out_w, out_h), (0, 0, 0, 0))
+        sd = ImageDraw.Draw(shadow)
+        sd.rounded_rectangle(
+            (pad + 2, pad + 7, pad + w + 2, pad + h + 7),
+            radius=max(12, int(ref * 0.018)),
+            fill=(16, 28, 45, 70),
+        )
+        shadow = shadow.filter(ImageFilter.GaussianBlur(max(6, int(pad * 0.22))))
+        canvas = Image.alpha_composite(canvas.convert("RGBA"), shadow).convert("RGB")
+        mask = _rounded_mask((w, h), max(12, int(ref * 0.018)))
+        canvas.paste(base, (pad, pad), mask)
+        photo_origin = (pad, pad)
+        use_outline = False
+        text_primary = (*theme["text"], 255) if len(theme["text"]) == 3 else theme["text"]
+        text_muted = (*theme["muted"], 255) if len(theme["muted"]) == 3 else theme["muted"]
+        base_layer = canvas
+    else:
+        # 经典/极简/纯文字：自由摆放不画空底栏。
+        use_outline = base_style in ("纯文字中下", "极简叠加") or frosted
+        if use_outline:
+            text_primary = (255, 255, 255, 255)
+            text_muted = (230, 234, 240, 255)
+        else:
+            text_primary = (*theme["text"], 255) if len(theme["text"]) == 3 else theme["text"]
+            text_muted = (*theme["muted"], 255) if len(theme["muted"]) == 3 else theme["muted"]
+        base_layer = base.copy().convert("RGB")
+
+    ox, oy = photo_origin
+    max_text_w = max(80, int(w * 0.86))
+    hits: list[dict[str, Any]] = [
+        {
+            "key": "photo_content",
+            "label": "",
+            "text": "",
+            "x": float(ox),
+            "y": float(oy),
+            "w": float(w),
+            "h": float(h),
+        }
+    ]
+    sprites: list[dict[str, Any]] = []
+
+    def _to_canvas(nx: float, ny: float) -> tuple[float, float]:
+        return nx * out_w, ny * out_h
+
+    # 用透明 probe 量字号，避免往底版上画。
+    probe = Image.new("RGBA", (max_text_w + 8, 64), (0, 0, 0, 0))
+    probe_draw = ImageDraw.Draw(probe)
+
+    if logo is not None and options.get("show_logo", True) is not False:
+        thumb = logo.copy().convert("RGBA")
+        max_h = max(28, int(ref * 0.08 * scale_setting))
+        if thumb.height > max_h:
+            ratio = max_h / thumb.height
+            thumb = thumb.resize((max(1, int(thumb.width * ratio)), max_h), Image.Resampling.LANCZOS)
+        nx, ny = _resolve_field_xy("logo", positions, defaults)
+        cx, cy = _to_canvas(nx, ny)
+        lx = int(round(cx - thumb.width / 2))
+        ly = int(round(cy - thumb.height / 2))
+        sprites.append(
+            {
+                "key": "logo",
+                "x": float(lx),
+                "y": float(ly),
+                "w": float(thumb.width),
+                "h": float(thumb.height),
+                "image": thumb,
+            }
+        )
+        _append_hit(hits, "logo", "", float(lx), float(ly), float(thumb.width), float(thumb.height))
+
+    for key, text, scale, bold in _freeform_field_items(md, options, brand, caption):
+        preferred = max(12, int(ref * (0.036 if bold else 0.026) * scale_setting * scale))
+        font = _fit_font(probe_draw, text, max_text_w, preferred, bold, bold and key == "brand")
+        fill = text_primary if bold or key in ("brand", "camera") else text_muted
+        spr = _make_text_sprite(text, font, fill, use_outline=use_outline)
+        nx, ny = _resolve_field_xy(key, positions, defaults)
+        cx, cy = _to_canvas(nx, ny)
+        sx = int(round(cx - spr.width / 2))
+        sy = int(round(cy - spr.height / 2))
+        sprites.append(
+            {
+                "key": key,
+                "x": float(sx),
+                "y": float(sy),
+                "w": float(spr.width),
+                "h": float(spr.height),
+                "image": spr,
+            }
+        )
+        _append_hit(hits, key, text, float(sx), float(sy), float(spr.width), float(spr.height))
+
+    composite = base_layer.convert("RGBA")
+    for spr in sprites:
+        img = spr["image"].convert("RGBA")
+        x, y = int(spr["x"]), int(spr["y"])
+        if x >= composite.width or y >= composite.height or x + img.width <= 0 or y + img.height <= 0:
+            continue
+        composite.paste(img, (x, y), img)
+
+    return {
+        "composite": composite.convert("RGB"),
+        "base": base_layer.convert("RGB"),
+        "sprites": sprites,
+        "hits": hits,
+    }
+
+
+def _render_custom_freeform(
+    base: Image.Image,
+    options: dict[str, Any],
+    md: PhotoMetadata,
+    brand: str,
+    caption: str,
+    logo: Image.Image | None,
+    theme: dict[str, tuple[int, int, int]],
+    frosted: bool,
+    scale_setting: float,
+    ref: int,
+) -> tuple[Image.Image, list[dict[str, Any]]]:
+    """自定义：返回合成图 + hits（导出/兼容路径）。"""
+    layers = render_custom_freeform_layers(
+        base, options, md, brand, caption, logo, theme, frosted, scale_setting, ref
+    )
+    return layers["composite"], layers["hits"]
+
+
+def _prepare_render_context(
     source_path: str | Path,
     options: dict[str, Any],
     *,
     base_image: Image.Image | None = None,
     metadata: PhotoMetadata | None = None,
-) -> tuple[Image.Image, list[dict[str, Any]]]:
-    """Render watermark and return clickable text regions in image coordinates.
-
-    base_image / metadata 供预览路径复用已解码图与缓存 EXIF；导出仍走默认全尺寸打开。
-    """
+) -> dict[str, Any]:
+    """打开底图、读 EXIF、装 logo，供单层/双层渲染共用。"""
     if base_image is not None:
         base = base_image.convert("RGB")
         if base is base_image:
@@ -500,12 +760,11 @@ def render_watermark_with_hits(
             original_exif = src.getexif()
         del original_exif
     w, h = base.size
-    # 短边基准：横竖构图下水印视觉比例一致（与卡片相框相同）。
     ref = min(w, h)
     theme_name = str(options.get("theme", "浅色"))
     theme = _color_theme(theme_name)
     frosted = _is_frosted_theme(theme_name)
-    style = str(options.get("style", "经典底栏"))
+    style = effective_style(options)
     scale_setting = max(0.65, min(1.6, float(options.get("scale", 1.0))))
     shift_x, shift_y = _layout_shift(options, w, h)
     md = metadata if metadata is not None else read_photo_metadata(source_path)
@@ -525,13 +784,180 @@ def render_watermark_with_hits(
     line_groups = [group for group in (title_segs, detail_segs, extra_segs) if group]
     if not line_groups:
         line_groups = [[TextSegment("EXIF 参数暂缺，可添加自定义说明", 1.0)]]
-
     logo_path = str(options.get("logo_path", "") or "")
     if options.get("show_logo", True) is False:
         logo_path = ""
     logo = _load_logo(logo_path, (max(52, int(ref * 0.247)), max(36, int(ref * 0.0715))))
-    base = base.convert("RGB")
+    return {
+        "base": base.convert("RGB"),
+        "w": w,
+        "h": h,
+        "ref": ref,
+        "theme": theme,
+        "frosted": frosted,
+        "style": style,
+        "scale_setting": scale_setting,
+        "shift_x": shift_x,
+        "shift_y": shift_y,
+        "md": md,
+        "brand": brand,
+        "caption": caption,
+        "line_groups": line_groups,
+        "logo": logo,
+    }
+
+
+def render_watermark_layers(
+    source_path: str | Path,
+    options: dict[str, Any],
+    *,
+    base_image: Image.Image | None = None,
+    metadata: PhotoMetadata | None = None,
+) -> dict[str, Any]:
+    """预览用：自定义返回 base+sprites；其它样式 sprites 为空、base=composite。"""
+    ctx = _prepare_render_context(source_path, options, base_image=base_image, metadata=metadata)
+    if is_custom_style(options):
+        return render_custom_freeform_layers(
+            ctx["base"],
+            options,
+            ctx["md"],
+            ctx["brand"],
+            ctx["caption"],
+            ctx["logo"],
+            ctx["theme"],
+            ctx["frosted"],
+            ctx["scale_setting"],
+            ctx["ref"],
+        )
+    composite, hits = render_watermark_with_hits(
+        source_path, options, base_image=ctx["base"], metadata=ctx["md"]
+    )
+    return {"composite": composite, "base": composite.copy(), "sprites": [], "hits": hits}
+
+
+def render_watermark_with_hits(
+    source_path: str | Path,
+    options: dict[str, Any],
+    *,
+    base_image: Image.Image | None = None,
+    metadata: PhotoMetadata | None = None,
+) -> tuple[Image.Image, list[dict[str, Any]]]:
+    """Render watermark and return clickable text regions in image coordinates.
+
+    base_image / metadata 供预览路径复用已解码图与缓存 EXIF；导出仍走默认全尺寸打开。
+    """
+    ctx = _prepare_render_context(source_path, options, base_image=base_image, metadata=metadata)
+    base = ctx["base"]
+    w, h = ctx["w"], ctx["h"]
+    ref = ctx["ref"]
+    theme = ctx["theme"]
+    frosted = ctx["frosted"]
+    style = ctx["style"]
+    scale_setting = ctx["scale_setting"]
+    shift_x, shift_y = ctx["shift_x"], ctx["shift_y"]
+    md = ctx["md"]
+    brand = ctx["brand"]
+    caption = ctx["caption"]
+    line_groups = ctx["line_groups"]
+    logo = ctx["logo"]
     hits: list[dict[str, Any]] = []
+
+    if is_custom_style(options):
+        return _render_custom_freeform(
+            base,
+            options,
+            md,
+            brand,
+            caption,
+            logo,
+            theme,
+            frosted,
+            scale_setting,
+            ref,
+        )
+
+    if style == "纯文字中下":
+        rgba = base.convert("RGBA")
+        overlay = Image.new("RGBA", rgba.size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(overlay)
+        text_primary = (255, 255, 255, 255)
+        text_muted = (230, 234, 240, 255)
+        max_text_w = max(80, int(w * 0.86))
+        center_x = w // 2 + shift_x
+        # 内容从画面中下部起排，可被自定义偏移上下移动。
+        cy = int(h * 0.74) + shift_y
+        block_top = cy
+        block_left = float(w)
+        block_right = 0.0
+        if logo is not None:
+            thumb = logo.copy()
+            max_h = max(28, int(ref * 0.08 * scale_setting))
+            if thumb.height > max_h:
+                ratio = max_h / thumb.height
+                thumb = thumb.resize((max(1, int(thumb.width * ratio)), max_h), Image.Resampling.LANCZOS)
+            lx = center_x - thumb.width // 2
+            overlay.paste(thumb, (lx, cy), thumb)
+            block_left = min(block_left, float(lx))
+            block_right = max(block_right, float(lx + thumb.width))
+            cy += thumb.height + max(6, int(ref * 0.012))
+            if brand and options.get("show_brand_text", False):
+                brand_size = max(14, int(ref * 0.028 * scale_setting))
+                fbrand = _fit_font(d, brand, max_text_w, brand_size, True, True)
+                bb = d.textbbox((0, 0), brand, font=fbrand)
+                bx = center_x - (bb[2] - bb[0]) / 2
+                _draw_text_with_outline(d, (bx, cy), brand, fbrand, text_primary)
+                hit = d.textbbox((bx, cy), brand, font=fbrand)
+                _append_hit(hits, "brand", brand, hit[0], hit[1], hit[2] - hit[0], hit[3] - hit[1])
+                block_left = min(block_left, float(hit[0]))
+                block_right = max(block_right, float(hit[2]))
+                cy += int(fbrand.size * 1.25)
+        elif brand:
+            brand_size = max(16, int(ref * 0.042 * scale_setting))
+            fbrand = _fit_font(d, brand, max_text_w, brand_size, True, True)
+            bb = d.textbbox((0, 0), brand, font=fbrand)
+            bx = center_x - (bb[2] - bb[0]) / 2
+            _draw_text_with_outline(d, (bx, cy), brand, fbrand, text_primary)
+            hit = d.textbbox((bx, cy), brand, font=fbrand)
+            _append_hit(hits, "brand", brand, hit[0], hit[1], hit[2] - hit[0], hit[3] - hit[1])
+            block_left = min(block_left, float(hit[0]))
+            block_right = max(block_right, float(hit[2]))
+            cy += int(fbrand.size * 1.25)
+        for idx, segments in enumerate(line_groups[:3]):
+            preferred = max(12, int(ref * (0.032 if idx == 0 else 0.024) * scale_setting))
+            before = cy
+            tallest = _draw_segments(
+                d,
+                segments,
+                cy,
+                max_text_w,
+                preferred,
+                text_primary if idx == 0 else text_muted,
+                idx == 0,
+                align="center",
+                anchor_x=center_x,
+                hits=hits,
+                outline=True,
+            )
+            # 用本行命中粗估左右边界
+            for hit in hits:
+                if hit.get("key") in {seg.key for seg in segments if seg.key}:
+                    block_left = min(block_left, float(hit["x"]))
+                    block_right = max(block_right, float(hit["x"]) + float(hit["w"]))
+            cy = before + int(max(tallest, preferred) * 1.28)
+        block_bottom = float(cy)
+        if block_right <= block_left:
+            block_left, block_right = w * 0.2, w * 0.8
+        pad_box = max(8, int(ref * 0.01))
+        _append_hit(
+            hits,
+            "watermark_bar",
+            "",
+            max(0.0, block_left - pad_box),
+            max(0.0, float(block_top) - pad_box),
+            min(float(w), block_right - block_left + 2 * pad_box),
+            min(float(h), block_bottom - block_top + 2 * pad_box),
+        )
+        return Image.alpha_composite(rgba, overlay).convert("RGB"), hits
 
     if style == "极简叠加":
         rgba = base.convert("RGBA")
@@ -630,8 +1056,9 @@ def render_watermark_with_hits(
         mask = _rounded_mask((w, h), max(12, int(min(w, h) * .018)))
         canvas.paste(base, (pad, pad), mask)
         d = ImageDraw.Draw(canvas)
-        cy = pad + h + max(14, int(footer_h * .10))
-        center_x = out_w // 2
+        footer_top = pad + h
+        cy = footer_top + max(14, int(footer_h * .10)) + shift_y
+        center_x = out_w // 2 + shift_x
         if logo is not None:
             lx = center_x - logo.width // 2
             canvas.paste(logo, (lx, cy), logo)
@@ -662,6 +1089,7 @@ def render_watermark_with_hits(
                 hits=hits,
             )
             cy += int(max(tallest, preferred) * 1.32)
+        _append_hit(hits, "watermark_bar", "", 0.0, float(footer_top), float(out_w), float(footer_h))
         return canvas, hits
 
     bar_h = max(96, int(ref * .1196 * scale_setting))

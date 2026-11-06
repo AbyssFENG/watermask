@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-STYLES = ("经典底栏", "极简叠加", "卡片相框")
+BUILTIN_STYLES = ("经典底栏", "极简叠加", "卡片相框", "纯文字中下")
+STYLES = (*BUILTIN_STYLES, "自定义")
 THEMES = ("浅色", "深色", "蓝色", "高斯模糊")
 
 TEXT_KEYS = (
@@ -28,6 +29,7 @@ FIELD_SCALE_KEYS = (
 
 OPTION_KEYS = (
     "style",
+    "base_style",
     "theme",
     "brand",
     "caption",
@@ -48,6 +50,21 @@ _FIELD_SCALE_MIN = 0.7
 _FIELD_SCALE_MAX = 1.6
 
 
+FIELD_POSITION_KEYS = (
+    "logo",
+    "brand",
+    "camera",
+    "lens",
+    "exif",
+    "date",
+    "gps",
+    "caption",
+)
+
+# 自定义自由摆放：细网格步长（归一化）。
+FIELD_GRID_STEP = 0.05
+
+
 def default_layout() -> dict[str, Any]:
     return {
         "anchor": "bottom_center",
@@ -58,6 +75,7 @@ def default_layout() -> dict[str, Any]:
         "bar_opacity": 0.72,
         "corner_radius": 0,
         "blur_radius": 12.0,
+        "field_positions": {},
     }
 
 
@@ -66,6 +84,7 @@ def default_settings() -> dict[str, Any]:
         "output_dir": str(Path.home() / "Pictures" / "PhotoWatermark"),
         "browse_dir": str(Path.home()),
         "style": "经典底栏",
+        "base_style": "经典底栏",
         "theme": "浅色",
         "brand": "",
         "caption": "",
@@ -116,6 +135,8 @@ def coerce_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     data = dict(base)
     style = str(raw.get("style", base["style"]) or "")
     data["style"] = style if style in STYLES else base["style"]
+    base_style = str(raw.get("base_style", base["base_style"]) or "")
+    data["base_style"] = base_style if base_style in BUILTIN_STYLES else base["base_style"]
     theme = str(raw.get("theme", base["theme"]) or "")
     if theme == "高斯模糊+变暗":
         theme = "高斯模糊"
@@ -149,6 +170,21 @@ def coerce_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     policy = str(raw.get("conflict_policy", base.get("conflict_policy", "number")) or "number")
     data["conflict_policy"] = policy if policy in ("number", "overwrite") else "number"
     return data
+
+
+def effective_style(options: dict[str, Any] | None) -> str:
+    """自定义模板使用底版；其它直接返回 style。"""
+    data = options if isinstance(options, dict) else {}
+    style = str(data.get("style", "经典底栏") or "经典底栏")
+    if style == "自定义":
+        base_style = str(data.get("base_style", "经典底栏") or "经典底栏")
+        return base_style if base_style in BUILTIN_STYLES else "经典底栏"
+    return style if style in BUILTIN_STYLES else "经典底栏"
+
+
+def is_custom_style(options: dict[str, Any] | None) -> bool:
+    data = options if isinstance(options, dict) else {}
+    return str(data.get("style", "") or "") == "自定义"
 
 
 def coerce_layout(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -189,7 +225,52 @@ def coerce_layout(raw: dict[str, Any] | None) -> dict[str, Any]:
         data["corner_radius"] = int(_clamp(float(raw.get("corner_radius", 0)), 0, 48))
     except (TypeError, ValueError):
         data["corner_radius"] = 0
+    data["field_positions"] = coerce_field_positions(raw.get("field_positions"))
     return data
+
+
+def coerce_field_positions(raw: Any) -> dict[str, dict[str, float]]:
+    """校验自定义字段归一化中心点。"""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for key, value in raw.items():
+        name = str(key or "").strip()
+        if name not in FIELD_POSITION_KEYS or not isinstance(value, dict):
+            continue
+        try:
+            x = float(value.get("x", 0.5))
+            y = float(value.get("y", 0.5))
+        except (TypeError, ValueError):
+            continue
+        out[name] = {
+            "x": max(0.02, min(0.98, x)),
+            "y": max(0.02, min(0.98, y)),
+        }
+    return out
+
+
+def snap_field_position(x: float, y: float, step: float = FIELD_GRID_STEP) -> tuple[float, float]:
+    step = max(0.01, float(step))
+
+    def _snap(v: float) -> float:
+        return max(0.02, min(0.98, round(float(v) / step) * step))
+
+    return _snap(x), _snap(y)
+
+
+def default_field_positions() -> dict[str, dict[str, float]]:
+    """中下纵向默认堆叠，供渲染缺省坐标。"""
+    return {
+        "logo": {"x": 0.5, "y": 0.66},
+        "brand": {"x": 0.5, "y": 0.72},
+        "camera": {"x": 0.5, "y": 0.78},
+        "lens": {"x": 0.5, "y": 0.82},
+        "exif": {"x": 0.5, "y": 0.86},
+        "date": {"x": 0.5, "y": 0.90},
+        "gps": {"x": 0.5, "y": 0.93},
+        "caption": {"x": 0.5, "y": 0.90},
+    }
 
 
 def load_settings(path: Path | None = None) -> dict[str, Any]:

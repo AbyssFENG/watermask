@@ -2,12 +2,15 @@
 """后台预览。先缩到长边上限再渲水印，供画布缩放查看。"""
 from __future__ import annotations
 
+from typing import Any
+
 from PIL import Image, ImageOps
 from PySide6.QtCore import QObject, QRunnable, Signal
 from PySide6.QtGui import QImage
 
 from photo_watermark_studio.core.metadata import read_photo_metadata
-from photo_watermark_studio.core.renderer import render_watermark_with_hits
+from photo_watermark_studio.core.renderer import render_watermark_layers
+from photo_watermark_studio.core.settings_store import is_custom_style
 
 # 预览长边上限：兼顾清晰度与内存。大于此尺寸再缩小；小于则保留渲染尺寸。
 PREVIEW_MAX_EDGE = 3200
@@ -71,8 +74,28 @@ def _status_from_metadata(metadata) -> str:
     return f"预览已更新。已读取相机信息：{metadata.camera or metadata.make or '部分参数'}"
 
 
+def _sprites_to_q(sprites: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for spr in sprites:
+        img = spr.get("image")
+        if img is None:
+            continue
+        out.append(
+            {
+                "key": str(spr.get("key", "")),
+                "x": float(spr.get("x", 0)),
+                "y": float(spr.get("y", 0)),
+                "w": float(spr.get("w", 0)),
+                "h": float(spr.get("h", 0)),
+                "image": pil_to_qimage(img),
+            }
+        )
+    return out
+
+
 class PreviewSignals(QObject):
-    finished = Signal(int, QImage, object, str, str)
+    # request_id, display_image(base 或 合成), hits, error, status, sprites(自定义字段层)
+    finished = Signal(int, QImage, object, str, str, object)
 
 
 class PreviewRunnable(QRunnable):
@@ -101,17 +124,22 @@ class PreviewRunnable(QRunnable):
             # 先缩后渲：避免在全尺寸上做模糊/排版，导出仍走全分辨率路径。
             base = load_preview_base(self.path, self.max_edge)
             metadata = read_photo_metadata(self.path)
-            rendered, hits = render_watermark_with_hits(
+            layers = render_watermark_layers(
                 self.path,
                 self.options,
                 base_image=base,
                 metadata=metadata,
             )
-            image = pil_to_qimage(rendered)
+            # 自定义：画布底图用无字段 base；其它：base==composite。
+            display = layers["base"] if is_custom_style(self.options) else layers["composite"]
+            image = pil_rgb_to_qimage(display)
+            sprites = _sprites_to_q(layers.get("sprites") or []) if is_custom_style(self.options) else []
             status = _status_from_metadata(metadata)
-            self.signals.finished.emit(self.request_id, image, list(hits), "", status)
+            self.signals.finished.emit(
+                self.request_id, image, list(layers.get("hits") or []), "", status, sprites
+            )
         except Exception as exc:
-            self.signals.finished.emit(self.request_id, QImage(), [], str(exc), "")
+            self.signals.finished.emit(self.request_id, QImage(), [], str(exc), "", [])
 
 
 class SourceImageSignals(QObject):

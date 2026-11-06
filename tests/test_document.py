@@ -15,7 +15,12 @@ from photo_watermark_studio.core.coordinate_mapper import CoordinateMapper, Imag
 from photo_watermark_studio.core.document import WatermarkDocument
 from photo_watermark_studio.core.history import EditHistory
 from photo_watermark_studio.core.renderer import render_from_document, render_watermark
-from photo_watermark_studio.core.settings_store import coerce_settings
+from photo_watermark_studio.core.settings_store import (
+    coerce_field_positions,
+    coerce_layout,
+    coerce_settings,
+    snap_field_position,
+)
 
 
 class DocumentTests(unittest.TestCase):
@@ -32,15 +37,45 @@ class DocumentTests(unittest.TestCase):
     def test_layout_patch(self) -> None:
         doc = WatermarkDocument()
         doc.set_layout(offset_x=0.1, offset_y=-0.05, anchor="top_center")
-        # 文档仍可记录布局；渲染侧暂时强制默认位置（功能已关闭）。
+        # 非自定义：文档可记录布局，渲染强制默认偏移。
         self.assertEqual(doc.layout["anchor"], "top_center")
         self.assertAlmostEqual(doc.layout["offset_x"], 0.1)
         self.assertEqual(doc.render_options()["anchor"], "bottom_center")
         self.assertAlmostEqual(doc.render_options()["offset_x"], 0.0)
 
+    def test_custom_style_exports_field_positions(self) -> None:
+        doc = WatermarkDocument({"style": "自定义", "base_style": "极简叠加"})
+        doc.set_layout(field_positions={"brand": {"x": 0.3, "y": 0.7}})
+        options = doc.render_options()
+        self.assertEqual(options["style"], "自定义")
+        self.assertEqual(options["base_style"], "极简叠加")
+        self.assertAlmostEqual(options["offset_x"], 0.0)
+        self.assertAlmostEqual(options["offset_y"], 0.0)
+        self.assertAlmostEqual(options["field_positions"]["brand"]["x"], 0.3)
+        self.assertAlmostEqual(options["field_positions"]["brand"]["y"], 0.7)
+
     def test_coerce_keeps_conflict_policy(self) -> None:
         data = coerce_settings({"conflict_policy": "overwrite"})
         self.assertEqual(data["conflict_policy"], "overwrite")
+
+    def test_coerce_field_positions_clamps_and_filters(self) -> None:
+        raw = {
+            "brand": {"x": 1.5, "y": -0.2},
+            "camera": {"x": 0.4, "y": 0.6},
+            "nope": {"x": 0.5, "y": 0.5},
+            "lens": "bad",
+        }
+        out = coerce_field_positions(raw)
+        self.assertNotIn("nope", out)
+        self.assertNotIn("lens", out)
+        self.assertAlmostEqual(out["brand"]["x"], 0.98)
+        self.assertAlmostEqual(out["brand"]["y"], 0.02)
+        self.assertAlmostEqual(out["camera"]["x"], 0.4)
+        layout = coerce_layout({"field_positions": raw})
+        self.assertIn("brand", layout["field_positions"])
+        sx, sy = snap_field_position(0.53, 0.77)
+        self.assertAlmostEqual(sx, 0.55)
+        self.assertAlmostEqual(sy, 0.75)
 
 
 class MapperTests(unittest.TestCase):

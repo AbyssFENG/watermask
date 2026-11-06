@@ -24,11 +24,13 @@ from photo_watermark_studio.core.renderer import (
     format_exposure_line,
     metadata_placeholders,
     render_watermark,
+    render_watermark_layers,
     render_watermark_with_hits,
 )
 
 OPTIONS = {
     "style": "经典底栏",
+    "base_style": "经典底栏",
     "theme": "浅色",
     "brand": "测试署名",
     "caption": "城市",
@@ -89,14 +91,145 @@ class RendererTests(unittest.TestCase):
         overlay = render_watermark(self.source, {**OPTIONS, "style": "极简叠加"})
         classic = render_watermark(self.source, {**OPTIONS, "style": "经典底栏"})
         card = render_watermark(self.source, {**OPTIONS, "style": "卡片相框"})
+        plain = render_watermark(self.source, {**OPTIONS, "style": "纯文字中下"})
         self.assertEqual(overlay.size, (320, 240))
         self.assertEqual(classic.size[0], 320)
         self.assertGreater(classic.size[1], 240)
         self.assertGreater(card.size[0], 320)
         self.assertGreater(card.size[1], 240)
+        self.assertEqual(plain.size, (320, 240))
         self.assertEqual(overlay.mode, "RGB")
         self.assertEqual(classic.mode, "RGB")
         self.assertEqual(card.mode, "RGB")
+        self.assertEqual(plain.mode, "RGB")
+
+    def test_plain_text_style_keeps_source_size_and_bar_hit(self) -> None:
+        image, hits = render_watermark_with_hits(self.source, {**OPTIONS, "style": "纯文字中下"})
+        self.assertEqual(image.size, (320, 240))
+        bar = next(hit for hit in hits if hit.get("key") == "watermark_bar")
+        self.assertGreater(float(bar["h"]), 10)
+        self.assertGreater(float(bar["y"]), 100)
+
+    def test_custom_freeform_default_stack_hits_overlap_text(self) -> None:
+        opts = {
+            **OPTIONS,
+            "style": "自定义",
+            "base_style": "纯文字中下",
+            "brand": "署名A",
+            "field_positions": {},
+        }
+        image, hits = render_watermark_with_hits(self.source, opts)
+        self.assertEqual(image.size, (320, 240))
+        self.assertFalse(any(h.get("key") == "watermark_bar" for h in hits))
+        brand = next(h for h in hits if h.get("key") == "brand")
+        photo = next(h for h in hits if h.get("key") == "photo_content")
+        self.assertAlmostEqual(float(photo["w"]), 320, delta=1)
+        # 默认中下：命中框中心应接近默认 brand 坐标。
+        cx = float(brand["x"]) + float(brand["w"]) / 2
+        cy = float(brand["y"]) + float(brand["h"]) / 2
+        self.assertAlmostEqual(cx / 320, 0.5, delta=0.08)
+        self.assertGreater(cy / 240, 0.6)
+
+    def test_custom_field_positions_place_hit_center(self) -> None:
+        opts = {
+            **OPTIONS,
+            "style": "自定义",
+            "base_style": "经典底栏",
+            "brand": "定点",
+            "show_camera": False,
+            "show_lens": False,
+            "show_exif": False,
+            "show_date": False,
+            "show_gps": False,
+            "caption": "",
+            "field_positions": {"brand": {"x": 0.25, "y": 0.35}},
+        }
+        img, hits = render_watermark_with_hits(self.source, opts)
+        brand = next(h for h in hits if h.get("key") == "brand")
+        cx = float(brand["x"]) + float(brand["w"]) / 2
+        cy = float(brand["y"]) + float(brand["h"]) / 2
+        self.assertAlmostEqual(cx / img.size[0], 0.25, delta=0.04)
+        self.assertAlmostEqual(cy / img.size[1], 0.35, delta=0.04)
+
+    def test_custom_layers_separate_base_and_sprites(self) -> None:
+        opts = {
+            **OPTIONS,
+            "style": "自定义",
+            "base_style": "纯文字中下",
+            "brand": "LAYER",
+            "show_camera": False,
+            "show_lens": False,
+            "show_exif": False,
+            "show_date": False,
+            "show_gps": False,
+            "caption": "",
+            "field_positions": {"brand": {"x": 0.5, "y": 0.4}},
+        }
+        layers = render_watermark_layers(self.source, opts)
+        base = layers["base"]
+        composite = layers["composite"]
+        sprites = layers["sprites"]
+        self.assertEqual(base.size, composite.size)
+        self.assertTrue(any(s.get("key") == "brand" for s in sprites))
+        brand_spr = next(s for s in sprites if s.get("key") == "brand")
+        spr_img = brand_spr["image"]
+        self.assertEqual(spr_img.mode, "RGBA")
+        # 精灵应含非透明像素；底版对应区域不应等于整段合成（字段在精灵层）。
+        bands = spr_img.split()
+        self.assertGreater(sum(1 for a in bands[3].getdata() if a > 0), 10)
+        cx = int(brand_spr["x"] + brand_spr["w"] / 2)
+        cy = int(brand_spr["y"] + brand_spr["h"] / 2)
+        self.assertNotEqual(base.getpixel((cx, cy)), composite.getpixel((cx, cy)))
+        # 合成与 with_hits 尺寸一致，hit 中心对齐坐标。
+        img, hits = render_watermark_with_hits(self.source, opts)
+        self.assertEqual(img.size, composite.size)
+        brand_hit = next(h for h in hits if h.get("key") == "brand")
+        hx = float(brand_hit["x"]) + float(brand_hit["w"]) / 2
+        hy = float(brand_hit["y"]) + float(brand_hit["h"]) / 2
+        self.assertAlmostEqual(hx / img.size[0], 0.5, delta=0.05)
+        self.assertAlmostEqual(hy / img.size[1], 0.4, delta=0.05)
+
+    def test_non_custom_layers_has_empty_sprites(self) -> None:
+        layers = render_watermark_layers(self.source, {**OPTIONS, "style": "经典底栏"})
+        self.assertEqual(layers["sprites"], [])
+        self.assertEqual(layers["base"].size, layers["composite"].size)
+
+    def test_custom_card_allows_field_outside_photo(self) -> None:
+        opts = {
+            **OPTIONS,
+            "style": "自定义",
+            "base_style": "卡片相框",
+            "brand": "边框",
+            "show_camera": False,
+            "show_lens": False,
+            "show_exif": False,
+            "show_date": False,
+            "show_gps": False,
+            "caption": "",
+            "field_positions": {"brand": {"x": 0.5, "y": 0.95}},
+        }
+        img, hits = render_watermark_with_hits(self.source, opts)
+        brand = next(h for h in hits if h.get("key") == "brand")
+        photo = next(h for h in hits if h.get("key") == "photo_content")
+        cx = float(brand["x"]) + float(brand["w"]) / 2
+        cy = float(brand["y"]) + float(brand["h"]) / 2
+        self.assertAlmostEqual(cx / img.size[0], 0.5, delta=0.04)
+        self.assertAlmostEqual(cy / img.size[1], 0.95, delta=0.04)
+        photo_bottom = float(photo["y"]) + float(photo["h"])
+        self.assertGreater(cy, photo_bottom)
+        self.assertLess(cy, float(img.size[1]))
+
+    def test_non_custom_ignores_field_positions(self) -> None:
+        base = {**OPTIONS, "style": "经典底栏", "brand": "B"}
+        _a, hits_a = render_watermark_with_hits(self.source, base)
+        _b, hits_b = render_watermark_with_hits(
+            self.source,
+            {**base, "field_positions": {"brand": {"x": 0.1, "y": 0.1}}},
+        )
+        bar_a = next(h for h in hits_a if h.get("key") == "watermark_bar")
+        bar_b = next(h for h in hits_b if h.get("key") == "watermark_bar")
+        self.assertAlmostEqual(float(bar_a["y"]), float(bar_b["y"]), delta=1.0)
+        self.assertAlmostEqual(float(bar_a["h"]), float(bar_b["h"]), delta=1.0)
 
     def test_overlay_frosted_uses_aligned_strip(self) -> None:
         # 构造带明显横条的图，确保磨砂条与原图同宽同高、不因取样缩放错位。
@@ -161,7 +294,7 @@ class RendererTests(unittest.TestCase):
         for theme in ("浅色", "深色", "蓝色", "高斯模糊"):
             image = render_watermark(self.source, {**OPTIONS, "theme": theme, "logo_path": str(self.logo)})
             self.assertGreater(image.size[0], 0)
-        for style in ("经典底栏", "极简叠加", "卡片相框"):
+        for style in ("经典底栏", "极简叠加", "卡片相框", "纯文字中下"):
             image = render_watermark(
                 self.source,
                 {**OPTIONS, "style": style, "theme": "高斯模糊", "logo_path": str(self.logo)},
@@ -178,7 +311,7 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(image.size[0], 320)
 
     def test_empty_brand_still_renders_all_styles(self) -> None:
-        for style in ("经典底栏", "极简叠加", "卡片相框"):
+        for style in ("经典底栏", "极简叠加", "卡片相框", "纯文字中下"):
             image = render_watermark(self.source, {**OPTIONS, "style": style, "brand": ""})
             self.assertGreater(image.size[0], 0)
             self.assertEqual(image.mode, "RGB")

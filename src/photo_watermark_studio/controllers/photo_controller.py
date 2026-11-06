@@ -19,6 +19,7 @@ from photo_watermark_studio.core.settings_store import (
     OPTION_KEYS,
     TEXT_KEYS,
     coerce_settings,
+    is_custom_style,
     load_settings,
 )
 from photo_watermark_studio.core import settings_store
@@ -39,6 +40,7 @@ class PhotoController(QObject):
     metadataHints = Signal(object)
     previewImage = Signal(QImage)
     previewHits = Signal(object)
+    previewSprites = Signal(object)
     previewMessage = Signal(str, bool)
     sourceImage = Signal(QImage)
     notice = Signal(str, str, str)
@@ -111,7 +113,6 @@ class PhotoController(QObject):
         base = self.document.render_options()
         base["conflict_policy"] = self.conflict_policy
         merged = self.edit_session.merge_into(base, photo_path or self.current_path)
-        # 位置布局暂关闭：合并单张覆盖后仍强制默认位置。
         merged["anchor"] = "bottom_center"
         merged["margin_x"] = 0.0
         merged["margin_y"] = 0.0
@@ -119,15 +120,13 @@ class PhotoController(QObject):
         merged["offset_y"] = 0.0
         if isinstance(merged.get("layout"), dict):
             layout = dict(merged["layout"])
-            layout.update(
-                {
-                    "anchor": "bottom_center",
-                    "margin_x": 0.0,
-                    "margin_y": 0.0,
-                    "offset_x": 0.0,
-                    "offset_y": 0.0,
-                }
-            )
+            layout["anchor"] = "bottom_center"
+            layout["margin_x"] = 0.0
+            layout["margin_y"] = 0.0
+            layout["offset_x"] = 0.0
+            layout["offset_y"] = 0.0
+            if "field_positions" in layout:
+                merged["field_positions"] = dict(layout.get("field_positions") or {})
             merged["layout"] = layout
         return merged
 
@@ -181,8 +180,35 @@ class PhotoController(QObject):
         self._save_timer.start()
 
     def apply_layout_offset(self, ox: float, oy: float) -> None:
-        # 位置布局功能暂时关闭。
+        """兼容旧接口；整框偏移已废弃，改用 field_positions。"""
         return
+
+    def apply_field_position(self, key: str, x: float, y: float) -> None:
+        from photo_watermark_studio.core.settings_store import (
+            FIELD_POSITION_KEYS,
+            snap_field_position,
+        )
+
+        if not is_custom_style(self.document.to_dict()):
+            return
+        name = str(key or "").strip()
+        if name not in FIELD_POSITION_KEYS:
+            return
+        try:
+            nx, ny = snap_field_position(float(x), float(y))
+        except (TypeError, ValueError):
+            return
+        positions = dict(self.document.layout.get("field_positions") or {})
+        prev = positions.get(name) or {}
+        if abs(float(prev.get("x", -1)) - nx) < 1e-6 and abs(float(prev.get("y", -1)) - ny) < 1e-6:
+            return
+        positions[name] = {"x": nx, "y": ny}
+        self.document.set_layout(field_positions=positions)
+        self.options = self.document.render_options()
+        self._history.push(self.document.settings_payload())
+        self._emit_history()
+        # 双图层下精灵已跟手，松手只持久化坐标，不必整图重渲。
+        self._save_timer.start()
 
     def apply_edit_session_field(self, field: str, text: str, scale: float | None = None) -> None:
         if not self.current_path:
@@ -530,6 +556,7 @@ class PhotoController(QObject):
         hits: object,
         error: str,
         status: str,
+        sprites: object = None,
     ) -> None:
         self._preview_running = False
         self._active_preview = None
@@ -543,13 +570,17 @@ class PhotoController(QObject):
             return
         if error:
             self.previewHits.emit([])
+            self.previewSprites.emit([])
             self.previewMessage.emit(f"无法预览此图片\n{error}", True)
             return
         if image.isNull():
             self.previewHits.emit([])
+            self.previewSprites.emit([])
             self.previewMessage.emit(PLACEHOLDER_TEXT, False)
             return
         self.previewImage.emit(image)
+        self.previewSprites.emit(sprites if isinstance(sprites, list) else [])
+        # hits 最后触发画布套用（此时 sprites 已缓存）。
         self.previewHits.emit(hits if isinstance(hits, list) else [])
         if status:
             self.statusChanged.emit(status)
