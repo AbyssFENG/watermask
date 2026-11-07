@@ -14,11 +14,11 @@ from photo_watermark_studio.qt_bootstrap import ensure_qt_dlls
 ensure_qt_dlls()
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 
 from photo_watermark_studio.app_window import MainWindow
-from photo_watermark_studio.paths import load_stylesheet
+from photo_watermark_studio.paths import app_logo_path, load_stylesheet
 
 
 def main() -> int:
@@ -30,6 +30,9 @@ def main() -> int:
     app.setOrganizationName("PhotoWatermarkStudio")
     app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 10))
+    logo = app_logo_path()
+    if logo.is_file():
+        app.setWindowIcon(QIcon(str(logo)))
     stylesheet = load_stylesheet()
     if stylesheet:
         app.setStyleSheet(stylesheet)

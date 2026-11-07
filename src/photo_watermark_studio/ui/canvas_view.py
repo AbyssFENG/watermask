@@ -4,8 +4,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap, QTransform, QWheelEvent
+from PySide6.QtCore import QPoint, QRectF, Qt, Signal
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QCursor,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+    QTransform,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsItem,
@@ -133,12 +144,15 @@ class _ZoomView(QGraphicsView):
     def __init__(self) -> None:
         super().__init__()
         self.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        # 左键留给水印字段；画布平移用右键。
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setBackgroundBrush(Qt.GlobalColor.transparent)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.SmartViewportUpdate)
+        self._panning = False
+        self._pan_last = QPoint()
 
     def current_scale(self) -> float:
         return abs(float(self.transform().m11()) or 1.0)
@@ -160,6 +174,33 @@ class _ZoomView(QGraphicsView):
         self.scaleChanged.emit(target)
         if user:
             self.userZoomed.emit()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.RightButton:
+            self._panning = True
+            self._pan_last = event.pos()
+            self.viewport().setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._panning and event.buttons() & Qt.MouseButton.RightButton:
+            delta = event.pos() - self._pan_last
+            self._pan_last = event.pos()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.RightButton and self._panning:
+            self._panning = False
+            self.viewport().unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -262,7 +303,7 @@ class CanvasPanel(QFrame):
         er.addWidget(self.editor_text, 1)
         er.addWidget(self.editor_scale)
         er.addWidget(self.editor_close)
-        self.tip = QLabel("修改写入当前照片覆盖；可撤销。预览为高分辨率，可放大查看细节。")
+        self.tip = QLabel("修改写入当前照片覆盖；可撤销。右键拖动画布；预览为高分辨率，可放大查看细节。")
         self.tip.setObjectName("MutedLabel")
         self.tip.setWordWrap(True)
         self._tip_default = self.tip.text()
@@ -291,7 +332,6 @@ class CanvasPanel(QFrame):
         self._allow_field_drag = False
         self._pending_drag_image: QImage | None = None
         self._pending_drag_hits: list[dict[str, Any]] = []
-        self._view_drag_mode = self.view.dragMode()
         self._field_dragging = False
         self._sprites: list[dict[str, Any]] = []
         self._pending_drag_sprites: list[dict[str, Any]] = []
@@ -350,7 +390,7 @@ class CanvasPanel(QFrame):
 
     def _update_tip(self) -> None:
         if self._allow_field_drag:
-            self.tip.setText("自定义模式：拖动字段实时跟手，松手吸附网格。空白处拖动画布。")
+            self.tip.setText("自定义模式：左键拖动字段，松手吸附网格；右键拖动画布。")
         else:
             self.tip.setText(self._tip_default)
 
@@ -492,8 +532,6 @@ class CanvasPanel(QFrame):
 
     def _on_field_drag_started(self) -> None:
         self._field_dragging = True
-        self._view_drag_mode = self.view.dragMode()
-        self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
         self._guide_item.setVisible(True)
         sender = self.sender()
         if isinstance(sender, DraggableFieldItem):
@@ -502,7 +540,6 @@ class CanvasPanel(QFrame):
     def _on_field_drag_finished(self) -> None:
         self._field_dragging = False
         self._guide_item.setVisible(False)
-        self.view.setDragMode(self._view_drag_mode)
         sender = self.sender()
         if isinstance(sender, DraggableFieldItem):
             sender.setZValue(45)

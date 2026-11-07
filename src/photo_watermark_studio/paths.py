@@ -12,6 +12,10 @@ def resource_dir() -> Path:
     return Path(__file__).resolve().parent / "resources"
 
 
+def app_logo_path() -> Path:
+    return resource_dir() / "app_logo.jpg"
+
+
 def load_stylesheet() -> str:
     path = resource_dir() / "styles.qss"
     try:

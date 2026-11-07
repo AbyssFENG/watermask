@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
+from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from photo_watermark_studio.controllers.photo_controller import PhotoController
+from photo_watermark_studio.paths import app_logo_path
 from photo_watermark_studio.widgets.photo_list import PhotoListPanel
 from photo_watermark_studio.widgets.preview_widget import PreviewPanel
 from photo_watermark_studio.widgets.settings_panel import SettingsPanel
@@ -34,6 +35,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(1440, 900)
         self.setMinimumSize(1100, 700)
+        logo = app_logo_path()
+        if logo.is_file():
+            self.setWindowIcon(QIcon(str(logo)))
         self.suppress_dialogs = False
         self.last_notice = ("", "", "")
         self._output_dir_full = ""
@@ -94,6 +98,19 @@ class MainWindow(QMainWindow):
         mark.setObjectName("LogoMark")
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         mark.setFixedSize(34, 34)
+        logo = app_logo_path()
+        if logo.is_file():
+            pix = QPixmap(str(logo))
+            if not pix.isNull():
+                mark.setPixmap(
+                    pix.scaled(
+                        34,
+                        34,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                mark.setText("")
 
         title = QLabel("光影水印")
         title.setObjectName("AppTitle")

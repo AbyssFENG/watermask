@@ -26,8 +26,8 @@ QWidget#StatusBar {
 }
 
 QLabel#LogoMark {
-    background: #285BE8;
-    color: #FFFFFF;
+    background: transparent;
+    color: #285BE8;
     border-radius: 8px;
     font-size: 16px;
     font-weight: 700;

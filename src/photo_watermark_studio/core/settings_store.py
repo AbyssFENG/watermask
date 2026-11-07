@@ -62,7 +62,7 @@ FIELD_POSITION_KEYS = (
 )
 
 # 自定义自由摆放：细网格步长（归一化）。
-FIELD_GRID_STEP = 0.05
+FIELD_GRID_STEP = 0.02
 
 
 def default_layout() -> dict[str, Any]:
