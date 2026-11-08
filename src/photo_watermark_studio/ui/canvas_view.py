@@ -9,6 +9,7 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QCursor,
+    QFont,
     QImage,
     QMouseEvent,
     QPainter,
@@ -18,6 +19,7 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QGraphicsItem,
     QGraphicsObject,
@@ -31,12 +33,24 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QStyleOptionGraphicsItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from photo_watermark_studio.core.coordinate_mapper import CoordinateMapper, ImageSize, ViewRect
-from photo_watermark_studio.core.settings_store import FIELD_GRID_STEP, FIELD_POSITION_KEYS
+from photo_watermark_studio.core.font_presets import (
+    DEFAULT_FONT_FAMILY,
+    available_font_names,
+    coerce_font_family,
+    qt_family_for,
+)
+from photo_watermark_studio.core.settings_store import (
+    DEFAULT_FIELD_BOLD,
+    FIELD_GRID_STEP,
+    FIELD_POSITION_KEYS,
+    coerce_field_opacity,
+)
 from photo_watermark_studio.ui.watermark_items import DraggableFieldItem, HitTextItem, WatermarkBarItem
 
 PLACEHOLDER_TEXT = "添加一张照片\n开始设计你的专属水印"
@@ -213,6 +227,9 @@ class CanvasPanel(QFrame):
     viewportResized = Signal()
     fieldEditRequested = Signal(str)
     fieldChanged = Signal(str, str, object)
+    fontFamilyChanged = Signal(str, str)  # field_key, font_family
+    fontBoldChanged = Signal(str, bool)  # field_key, bold
+    fontOpacityChanged = Signal(str, float)  # field_key, opacity 0.3–1.0
     layoutOffsetChanged = Signal(float, float)  # 兼容旧接线；自定义不再使用
     fieldPositionChanged = Signal(str, float, float)
     compareToggled = Signal(bool)
@@ -291,16 +308,56 @@ class CanvasPanel(QFrame):
         self.editor_label.setObjectName("MutedLabel")
         self.editor_text = QLineEdit()
         self.editor_text.setObjectName("watermarkTextEdit")
+        self.editor_font = QComboBox()
+        self.editor_font.setObjectName("watermarkFontCombo")
+        self.editor_font.setFixedWidth(148)
+        self.editor_font.setToolTip("水印字体")
+        for name in available_font_names():
+            self.editor_font.addItem(name)
+            family = qt_family_for(name)
+            if family:
+                self.editor_font.setItemData(
+                    self.editor_font.count() - 1,
+                    QFont(family, 11),
+                    Qt.ItemDataRole.FontRole,
+                )
+        self.editor_bold = QToolButton()
+        self.editor_bold.setObjectName("watermarkBoldButton")
+        self.editor_bold.setText("B")
+        self.editor_bold.setCheckable(True)
+        self.editor_bold.setToolTip("加粗")
+        self.editor_bold.setFixedSize(32, 32)
+        bold_font = QFont(self.editor_bold.font())
+        bold_font.setBold(True)
+        self.editor_bold.setFont(bold_font)
+        self.editor_opacity_label = QLabel("透明")
+        self.editor_opacity_label.setObjectName("MutedLabel")
+        self.editor_opacity = QSpinBox()
+        self.editor_opacity.setObjectName("watermarkOpacitySpin")
+        self.editor_opacity.setRange(30, 100)
+        self.editor_opacity.setSingleStep(5)
+        self.editor_opacity.setSuffix("%")
+        self.editor_opacity.setFixedWidth(72)
+        self.editor_opacity.setToolTip("文字透明度")
+        self.editor_opacity.setValue(100)
+        self.editor_scale_label = QLabel("大小")
+        self.editor_scale_label.setObjectName("MutedLabel")
         self.editor_scale = QSpinBox()
         self.editor_scale.setObjectName("watermarkScaleSpin")
         self.editor_scale.setRange(70, 160)
         self.editor_scale.setSingleStep(5)
         self.editor_scale.setSuffix("%")
-        self.editor_scale.setFixedWidth(78)
+        self.editor_scale.setFixedWidth(72)
+        self.editor_scale.setToolTip("字段大小")
         self.editor_close = QPushButton("完成")
         self.editor_close.setProperty("role", "soft")
         er.addWidget(self.editor_label)
         er.addWidget(self.editor_text, 1)
+        er.addWidget(self.editor_font)
+        er.addWidget(self.editor_bold)
+        er.addWidget(self.editor_opacity_label)
+        er.addWidget(self.editor_opacity)
+        er.addWidget(self.editor_scale_label)
         er.addWidget(self.editor_scale)
         er.addWidget(self.editor_close)
         self.tip = QLabel("修改写入当前照片覆盖；可撤销。右键拖动画布；预览为高分辨率，可放大查看细节。")
@@ -345,6 +402,9 @@ class CanvasPanel(QFrame):
         self.view.userZoomed.connect(self._on_user_zoomed)
         self.view.viewportResized.connect(self._on_viewport_resized)
         self.editor_text.textEdited.connect(self._emit_editor)
+        self.editor_font.currentTextChanged.connect(self._emit_font_family)
+        self.editor_bold.toggled.connect(self._emit_font_bold)
+        self.editor_opacity.valueChanged.connect(self._emit_font_opacity)
         self.editor_scale.valueChanged.connect(self._emit_editor)
         self.editor_close.clicked.connect(self.hide_field_editor)
 
@@ -593,15 +653,29 @@ class CanvasPanel(QFrame):
         self._editor_key = str(payload.get("key", ""))
         self.editor_label.setText(str(payload.get("label", self._editor_key)))
         self.editor_text.blockSignals(True)
+        self.editor_font.blockSignals(True)
+        self.editor_bold.blockSignals(True)
+        self.editor_opacity.blockSignals(True)
         self.editor_scale.blockSignals(True)
         self.editor_text.setText(str(payload.get("text", "")))
         self.editor_text.setPlaceholderText(str(payload.get("placeholder", "照片 EXIF 原文")))
+        font_family = coerce_font_family(payload.get("font_family", DEFAULT_FONT_FAMILY))
+        idx = self.editor_font.findText(font_family)
+        self.editor_font.setCurrentIndex(idx if idx >= 0 else 0)
+        default_bold = bool(DEFAULT_FIELD_BOLD.get(self._editor_key, False))
+        self.editor_bold.setChecked(bool(payload.get("font_bold", default_bold)))
+        opacity = coerce_field_opacity(payload.get("font_opacity", 1.0), 1.0)
+        self.editor_opacity.setValue(int(round(opacity * 100)))
         has_scale = bool(payload.get("has_scale", False))
+        self.editor_scale_label.setVisible(has_scale)
         self.editor_scale.setVisible(has_scale)
         if has_scale:
             scale = float(payload.get("scale", 1.0) or 1.0)
             self.editor_scale.setValue(int(round(scale * 100)))
         self.editor_text.blockSignals(False)
+        self.editor_font.blockSignals(False)
+        self.editor_bold.blockSignals(False)
+        self.editor_opacity.blockSignals(False)
         self.editor_scale.blockSignals(False)
         self.editor.setVisible(True)
         self.editor_text.setFocus()
@@ -615,6 +689,27 @@ class CanvasPanel(QFrame):
             return
         scale = self.editor_scale.value() / 100 if self.editor_scale.isVisible() else None
         self.fieldChanged.emit(self._editor_key, self.editor_text.text(), scale)
+
+    def _emit_font_family(self, *_args: object) -> None:
+        if not self._editor_key:
+            return
+        self.fontFamilyChanged.emit(
+            self._editor_key,
+            coerce_font_family(self.editor_font.currentText()),
+        )
+
+    def _emit_font_bold(self, checked: bool) -> None:
+        if not self._editor_key:
+            return
+        self.fontBoldChanged.emit(self._editor_key, bool(checked))
+
+    def _emit_font_opacity(self, *_args: object) -> None:
+        if not self._editor_key:
+            return
+        self.fontOpacityChanged.emit(
+            self._editor_key,
+            coerce_field_opacity(self.editor_opacity.value() / 100.0, 1.0),
+        )
 
     def set_image(self, image: QImage, hits: list | None = None) -> None:
         self.set_preview_image(image, hits)

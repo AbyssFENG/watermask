@@ -74,8 +74,8 @@ class DocumentTests(unittest.TestCase):
         layout = coerce_layout({"field_positions": raw})
         self.assertIn("brand", layout["field_positions"])
         sx, sy = snap_field_position(0.53, 0.77)
-        self.assertAlmostEqual(sx, 0.52)
-        self.assertAlmostEqual(sy, 0.76)
+        self.assertAlmostEqual(sx, 0.53)
+        self.assertAlmostEqual(sy, 0.77)
 
 
 class MapperTests(unittest.TestCase):

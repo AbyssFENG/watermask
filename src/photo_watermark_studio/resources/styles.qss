@@ -337,6 +337,51 @@ QFrame#FieldEditorBar {
     border-radius: 10px;
 }
 
+QComboBox#watermarkFontCombo {
+    background: #FFFFFF;
+    border: 1px solid #D5DCE6;
+    border-radius: 8px;
+    padding: 4px 8px;
+    min-height: 28px;
+    color: #1F2A3A;
+}
+
+QComboBox#watermarkFontCombo:hover {
+    border-color: #A8B4C4;
+}
+
+QComboBox#watermarkFontCombo::drop-down {
+    border: none;
+    width: 22px;
+}
+
+QToolButton#watermarkBoldButton {
+    background: #FFFFFF;
+    border: 1px solid #D5DCE6;
+    border-radius: 8px;
+    color: #1F2A3A;
+    font-weight: 700;
+}
+
+QToolButton#watermarkBoldButton:hover {
+    border-color: #A8B4C4;
+}
+
+QToolButton#watermarkBoldButton:checked {
+    background: #1F2A3A;
+    border-color: #1F2A3A;
+    color: #FFFFFF;
+}
+
+QSpinBox#watermarkOpacitySpin {
+    background: #FFFFFF;
+    border: 1px solid #D5DCE6;
+    border-radius: 8px;
+    padding: 4px 6px;
+    min-height: 28px;
+    color: #1F2A3A;
+}
+
 QLabel#StatusSummary {
     color: #526176;
     font-weight: 600;

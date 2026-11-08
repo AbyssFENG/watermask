@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from photo_watermark_studio.core.font_presets import coerce_font_family
+
 BUILTIN_STYLES = ("经典底栏", "极简叠加", "卡片相框", "纯文字中下")
 STYLES = (*BUILTIN_STYLES, "自定义")
 THEMES = ("浅色", "深色", "蓝色", "高斯模糊")
@@ -26,6 +28,43 @@ FIELD_SCALE_KEYS = (
     "date_scale",
     "gps_scale",
 )
+FIELD_FONT_KEYS = (
+    "camera_font",
+    "lens_font",
+    "exif_font",
+    "date_font",
+    "gps_font",
+    "brand_font",
+    "caption_font",
+)
+FIELD_BOLD_KEYS = (
+    "camera_bold",
+    "lens_bold",
+    "exif_bold",
+    "date_bold",
+    "gps_bold",
+    "brand_bold",
+    "caption_bold",
+)
+FIELD_OPACITY_KEYS = (
+    "camera_opacity",
+    "lens_opacity",
+    "exif_opacity",
+    "date_opacity",
+    "gps_opacity",
+    "brand_opacity",
+    "caption_opacity",
+)
+# 与旧版硬编码观感一致：标题行与署默认加粗。
+DEFAULT_FIELD_BOLD = {
+    "camera": True,
+    "lens": True,
+    "exif": False,
+    "date": False,
+    "gps": False,
+    "brand": True,
+    "caption": False,
+}
 
 OPTION_KEYS = (
     "style",
@@ -44,10 +83,15 @@ OPTION_KEYS = (
     "show_brand_text",
     *TEXT_KEYS,
     *FIELD_SCALE_KEYS,
+    *FIELD_FONT_KEYS,
+    *FIELD_BOLD_KEYS,
+    *FIELD_OPACITY_KEYS,
 )
 
 _FIELD_SCALE_MIN = 0.7
 _FIELD_SCALE_MAX = 1.6
+_FIELD_OPACITY_MIN = 0.3
+_FIELD_OPACITY_MAX = 1.0
 
 
 FIELD_POSITION_KEYS = (
@@ -62,7 +106,7 @@ FIELD_POSITION_KEYS = (
 )
 
 # 自定义自由摆放：细网格步长（归一化）。
-FIELD_GRID_STEP = 0.02
+FIELD_GRID_STEP = 0.01
 
 
 def default_layout() -> dict[str, Any]:
@@ -107,6 +151,27 @@ def default_settings() -> dict[str, Any]:
         "exif_scale": 1.0,
         "date_scale": 1.0,
         "gps_scale": 1.0,
+        "camera_font": "默认",
+        "lens_font": "默认",
+        "exif_font": "默认",
+        "date_font": "默认",
+        "gps_font": "默认",
+        "brand_font": "默认",
+        "caption_font": "默认",
+        "camera_bold": True,
+        "lens_bold": True,
+        "exif_bold": False,
+        "date_bold": False,
+        "gps_bold": False,
+        "brand_bold": True,
+        "caption_bold": False,
+        "camera_opacity": 1.0,
+        "lens_opacity": 1.0,
+        "exif_opacity": 1.0,
+        "date_opacity": 1.0,
+        "gps_opacity": 1.0,
+        "brand_opacity": 1.0,
+        "caption_opacity": 1.0,
         "quality": 95,
         "layout": default_layout(),
         "conflict_policy": "number",
@@ -126,6 +191,14 @@ def _coerce_field_scale(raw: Any, default: float = 1.0) -> float:
     except (TypeError, ValueError):
         value = default
     return min(_FIELD_SCALE_MAX, max(_FIELD_SCALE_MIN, value))
+
+
+def coerce_field_opacity(raw: Any, default: float = 1.0) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = default
+    return min(_FIELD_OPACITY_MAX, max(_FIELD_OPACITY_MIN, value))
 
 
 def coerce_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -155,6 +228,12 @@ def coerce_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
         data[key] = str(raw.get(key, "") or "")
     for key in FIELD_SCALE_KEYS:
         data[key] = _coerce_field_scale(raw.get(key, 1.0), 1.0)
+    for key in FIELD_FONT_KEYS:
+        data[key] = coerce_font_family(raw.get(key, base[key]))
+    for key in FIELD_BOLD_KEYS:
+        data[key] = bool(raw.get(key, base[key]))
+    for key in FIELD_OPACITY_KEYS:
+        data[key] = coerce_field_opacity(raw.get(key, base[key]), 1.0)
     try:
         quality = int(float(raw.get("quality", 95)))
     except (TypeError, ValueError):

@@ -27,11 +27,17 @@ from PySide6.QtWidgets import (
 )
 
 from photo_watermark_studio.core.document import WatermarkDocument
+from photo_watermark_studio.core.font_presets import DEFAULT_FONT_FAMILY, coerce_font_family
 from photo_watermark_studio.core.settings_store import (
     BUILTIN_STYLES,
+    DEFAULT_FIELD_BOLD,
+    FIELD_BOLD_KEYS,
+    FIELD_FONT_KEYS,
+    FIELD_OPACITY_KEYS,
     FIELD_POSITION_KEYS,
     STYLES,
     THEMES,
+    coerce_field_opacity,
     coerce_field_positions,
     coerce_settings,
     default_layout,
@@ -138,6 +144,15 @@ class SettingsPanel(QFrame):
             "gps": "",
         }
         self._field_scales: dict[str, float] = {key: 1.0 for key in _FIELD_SCALE_KEYS}
+        self._field_fonts: dict[str, str] = {
+            key.removesuffix("_font"): DEFAULT_FONT_FAMILY for key in FIELD_FONT_KEYS
+        }
+        self._field_bolds: dict[str, bool] = {
+            key: bool(DEFAULT_FIELD_BOLD.get(key, False)) for key in DEFAULT_FIELD_BOLD
+        }
+        self._field_opacities: dict[str, float] = {
+            key.removesuffix("_opacity"): 1.0 for key in FIELD_OPACITY_KEYS
+        }
         self._missing_hint = QLabel("")
         self._missing_hint.setObjectName("MutedLabel")
         self._missing_hint.setWordWrap(True)
@@ -626,7 +641,46 @@ class SettingsPanel(QFrame):
             "placeholder": hint,
             "scale": float(self._field_scales.get(key, 1.0)) if scale_key else None,
             "has_scale": scale_key is not None,
+            "font_family": self.field_font(key),
+            "font_bold": self.field_bold(key),
+            "font_opacity": self.field_opacity(key),
         }
+
+    def field_font(self, key: str) -> str:
+        return coerce_font_family(self._field_fonts.get(key, DEFAULT_FONT_FAMILY))
+
+    def set_field_font(self, key: str, name: str) -> None:
+        if key not in self._field_fonts:
+            return
+        next_name = coerce_font_family(name)
+        if next_name == self._field_fonts.get(key):
+            return
+        self._field_fonts[key] = next_name
+        self._emit()
+
+    def field_bold(self, key: str) -> bool:
+        return bool(self._field_bolds.get(key, DEFAULT_FIELD_BOLD.get(key, False)))
+
+    def set_field_bold(self, key: str, bold: bool) -> None:
+        if key not in self._field_bolds:
+            return
+        next_bold = bool(bold)
+        if next_bold == self._field_bolds.get(key):
+            return
+        self._field_bolds[key] = next_bold
+        self._emit()
+
+    def field_opacity(self, key: str) -> float:
+        return coerce_field_opacity(self._field_opacities.get(key, 1.0), 1.0)
+
+    def set_field_opacity(self, key: str, opacity: float) -> None:
+        if key not in self._field_opacities:
+            return
+        next_opacity = coerce_field_opacity(opacity, 1.0)
+        if abs(next_opacity - float(self._field_opacities.get(key, 1.0))) < 1e-6:
+            return
+        self._field_opacities[key] = next_opacity
+        self._emit()
 
     def apply_field_edit(self, key: str, text: str, scale: float | None = None) -> None:
         if key == "brand":
@@ -675,6 +729,15 @@ class SettingsPanel(QFrame):
         for key, _label, _show_key, text_key, scale_key, _check_name in _META_FIELDS:
             data[text_key] = ""
             data[scale_key] = 1.0
+            data[f"{key}_font"] = DEFAULT_FONT_FAMILY
+            data[f"{key}_bold"] = bool(DEFAULT_FIELD_BOLD.get(key, False))
+            data[f"{key}_opacity"] = 1.0
+        data["brand_font"] = self.field_font("brand")
+        data["caption_font"] = self.field_font("caption")
+        data["brand_bold"] = self.field_bold("brand")
+        data["caption_bold"] = self.field_bold("caption")
+        data["brand_opacity"] = self.field_opacity("brand")
+        data["caption_opacity"] = self.field_opacity("caption")
         return data
 
     def document(self) -> WatermarkDocument:
@@ -709,6 +772,18 @@ class SettingsPanel(QFrame):
                 self._field_scales[key] = float(data[scale_key])
             self.scale_slider.setValue(int(round(float(data["scale"]) * 100)))
             self.scale_value.setText(f"{self.scale_slider.value()}%")
+            for font_key in FIELD_FONT_KEYS:
+                field = font_key.removesuffix("_font")
+                self._field_fonts[field] = coerce_font_family(data.get(font_key, DEFAULT_FONT_FAMILY))
+            for bold_key in FIELD_BOLD_KEYS:
+                field = bold_key.removesuffix("_bold")
+                default_bold = bool(DEFAULT_FIELD_BOLD.get(field, False))
+                self._field_bolds[field] = bool(data.get(bold_key, default_bold))
+            for opacity_key in FIELD_OPACITY_KEYS:
+                field = opacity_key.removesuffix("_opacity")
+                self._field_opacities[field] = coerce_field_opacity(
+                    data.get(opacity_key, 1.0), 1.0
+                )
             self.quality_slider.setValue(int(data["quality"]))
             self.quality_value.setText(str(self.quality_slider.value()))
             self._logo_path = str(data["logo_path"])

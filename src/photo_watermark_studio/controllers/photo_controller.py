@@ -210,13 +210,66 @@ class PhotoController(QObject):
         # 双图层下精灵已跟手，松手只持久化坐标，不必整图重渲。
         self._save_timer.start()
 
-    def apply_edit_session_field(self, field: str, text: str, scale: float | None = None) -> None:
+    def apply_edit_session_field(
+        self,
+        field: str,
+        text: str,
+        scale: float | None = None,
+        font: str | None = None,
+        bold: bool | None = None,
+        opacity: float | None = None,
+    ) -> None:
         if not self.current_path:
             return
-        self.edit_session.set_field(self.current_path, field, text, scale)
+        self.edit_session.set_field(
+            self.current_path,
+            field,
+            text,
+            scale,
+            font=font,
+            bold=bold,
+            opacity=opacity,
+        )
         self._mark_edited(self.current_path)
         self.schedule_preview()
         self._emit_summary()
+
+    def _apply_session_style(
+        self,
+        field: str,
+        *,
+        font: str | None = None,
+        bold: bool | None = None,
+        opacity: float | None = None,
+    ) -> None:
+        if not self.current_path:
+            return
+        current = self.edit_session.get_field(self.current_path, field)
+        self.edit_session.set_field(
+            self.current_path,
+            field,
+            str(current.get("text", "")),
+            float(current.get("scale", 1.0)),
+            font=font if font is not None else str(current.get("font", "默认")),
+            bold=bool(current.get("bold", False)) if bold is None else bool(bold),
+            opacity=(
+                float(current.get("opacity", 1.0))
+                if opacity is None
+                else float(opacity)
+            ),
+        )
+        self._mark_edited(self.current_path)
+        self.schedule_preview()
+        self._emit_summary()
+
+    def apply_edit_session_font(self, field: str, font: str) -> None:
+        self._apply_session_style(field, font=font)
+
+    def apply_edit_session_bold(self, field: str, bold: bool) -> None:
+        self._apply_session_style(field, bold=bold)
+
+    def apply_edit_session_opacity(self, field: str, opacity: float) -> None:
+        self._apply_session_style(field, opacity=opacity)
 
     def reset_photo_overrides(self, path: str | None = None) -> None:
         target = path or self.current_path

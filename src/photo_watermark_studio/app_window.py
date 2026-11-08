@@ -238,6 +238,9 @@ class MainWindow(QMainWindow):
         self.photo_list.resetPhotoRequested.connect(self.controller.reset_photo_overrides)
         self.preview.fieldEditRequested.connect(self._on_field_edit_requested)
         self.preview.fieldChanged.connect(self._on_field_changed)
+        self.preview.fontFamilyChanged.connect(self._on_font_family_changed)
+        self.preview.fontBoldChanged.connect(self._on_font_bold_changed)
+        self.preview.fontOpacityChanged.connect(self._on_font_opacity_changed)
         self.preview.fieldPositionChanged.connect(self._on_field_position)
         self.settings.optionsChanged.connect(self._on_settings)
         self.settings.chooseLogoRequested.connect(self._choose_logo)
@@ -346,6 +349,9 @@ class MainWindow(QMainWindow):
                 "placeholder": exif_text or "照片 EXIF 原文",
                 "scale": float(session.get("scale", 1.0)),
                 "has_scale": True,
+                "font_family": str(session.get("font", "默认")),
+                "font_bold": bool(session.get("bold", False)),
+                "font_opacity": float(session.get("opacity", 1.0)),
             }
         )
 
@@ -356,6 +362,27 @@ class MainWindow(QMainWindow):
             return
         if key in ("camera", "lens", "exif", "date", "gps"):
             self.controller.apply_edit_session_field(key, text, scale_value)
+
+    def _on_font_family_changed(self, key: str, name: str) -> None:
+        if key in ("brand", "caption"):
+            self.settings.set_field_font(key, name)
+            return
+        if key in ("camera", "lens", "exif", "date", "gps"):
+            self.controller.apply_edit_session_font(key, name)
+
+    def _on_font_bold_changed(self, key: str, bold: bool) -> None:
+        if key in ("brand", "caption"):
+            self.settings.set_field_bold(key, bold)
+            return
+        if key in ("camera", "lens", "exif", "date", "gps"):
+            self.controller.apply_edit_session_bold(key, bold)
+
+    def _on_font_opacity_changed(self, key: str, opacity: float) -> None:
+        if key in ("brand", "caption"):
+            self.settings.set_field_opacity(key, opacity)
+            return
+        if key in ("camera", "lens", "exif", "date", "gps"):
+            self.controller.apply_edit_session_opacity(key, opacity)
 
     def _on_edit_session_cleared(self) -> None:
         self.preview.hide_field_editor()

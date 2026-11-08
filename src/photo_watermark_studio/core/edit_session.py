@@ -8,9 +8,17 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from photo_watermark_studio.core.settings_store import FIELD_SCALE_KEYS, TEXT_KEYS, coerce_layout
+from photo_watermark_studio.core.font_presets import DEFAULT_FONT_FAMILY, coerce_font_family
+from photo_watermark_studio.core.settings_store import (
+    DEFAULT_FIELD_BOLD,
+    FIELD_SCALE_KEYS,
+    TEXT_KEYS,
+    coerce_field_opacity,
+    coerce_layout,
+)
 
 _EDITABLE_META = ("camera", "lens", "exif", "date", "gps")
+_META_FONT_KEYS = tuple(f"{key}_font" for key in _EDITABLE_META)
 _DOC_KEYS = ("layout",)
 
 
@@ -28,6 +36,11 @@ def empty_photo_overrides() -> dict[str, Any]:
         data[key] = ""
     for key in FIELD_SCALE_KEYS:
         data[key] = 1.0
+    for key in _META_FONT_KEYS:
+        data[key] = DEFAULT_FONT_FAMILY
+    for key in _EDITABLE_META:
+        data[f"{key}_bold"] = bool(DEFAULT_FIELD_BOLD.get(key, False))
+        data[f"{key}_opacity"] = 1.0
     data["layout"] = {}
     return data
 
@@ -44,6 +57,16 @@ def _coerce_photo_overrides(raw: dict[str, Any] | None) -> dict[str, Any]:
         except (TypeError, ValueError):
             value = 1.0
         data[key] = min(1.6, max(0.7, value))
+    for key in _META_FONT_KEYS:
+        data[key] = coerce_font_family(raw.get(key, DEFAULT_FONT_FAMILY))
+    for key in _EDITABLE_META:
+        bold_key = f"{key}_bold"
+        default_bold = bool(DEFAULT_FIELD_BOLD.get(key, False))
+        if bold_key in raw:
+            data[bold_key] = bool(raw.get(bold_key))
+        else:
+            data[bold_key] = default_bold
+        data[f"{key}_opacity"] = coerce_field_opacity(raw.get(f"{key}_opacity", 1.0), 1.0)
     if isinstance(raw.get("layout"), dict) and raw["layout"]:
         data["layout"] = coerce_layout(raw["layout"])
     else:
@@ -75,6 +98,16 @@ def merge_photo_overrides(
         merged[item] = values.get(item, "")
     for item in FIELD_SCALE_KEYS:
         merged[item] = values.get(item, 1.0)
+    for item in _META_FONT_KEYS:
+        merged[item] = values.get(item, DEFAULT_FONT_FAMILY)
+    for key in _EDITABLE_META:
+        bold_key = f"{key}_bold"
+        merged[bold_key] = bool(
+            values.get(bold_key, DEFAULT_FIELD_BOLD.get(key, False))
+        )
+        merged[f"{key}_opacity"] = coerce_field_opacity(
+            values.get(f"{key}_opacity", 1.0), 1.0
+        )
     layout_override = values.get("layout") or {}
     if layout_override:
         base_layout = coerce_layout(merged.get("layout") if isinstance(merged.get("layout"), dict) else None)
@@ -179,6 +212,15 @@ class EditSessionStore:
         for key in FIELD_SCALE_KEYS:
             if abs(float(values.get(key, 1.0)) - 1.0) > 1e-6:
                 return True
+        for key in _META_FONT_KEYS:
+            if coerce_font_family(values.get(key, DEFAULT_FONT_FAMILY)) != DEFAULT_FONT_FAMILY:
+                return True
+        for key in _EDITABLE_META:
+            default_bold = bool(DEFAULT_FIELD_BOLD.get(key, False))
+            if bool(values.get(f"{key}_bold", default_bold)) != default_bold:
+                return True
+            if abs(coerce_field_opacity(values.get(f"{key}_opacity", 1.0), 1.0) - 1.0) > 1e-6:
+                return True
         layout = values.get("layout") or {}
         if isinstance(layout, dict) and layout:
             return True
@@ -186,9 +228,13 @@ class EditSessionStore:
 
     def get_field(self, photo_path: str | Path | None, field: str) -> dict[str, Any]:
         values = self._photos.get(normalize_photo_path(photo_path), empty_photo_overrides())
+        default_bold = bool(DEFAULT_FIELD_BOLD.get(field, False))
         return {
             "text": str(values.get(f"{field}_text", "") or ""),
             "scale": float(values.get(f"{field}_scale", 1.0)),
+            "font": coerce_font_family(values.get(f"{field}_font", DEFAULT_FONT_FAMILY)),
+            "bold": bool(values.get(f"{field}_bold", default_bold)),
+            "opacity": coerce_field_opacity(values.get(f"{field}_opacity", 1.0), 1.0),
         }
 
     def set_field(
@@ -197,6 +243,9 @@ class EditSessionStore:
         field: str,
         text: str,
         scale: float | None = None,
+        font: str | None = None,
+        bold: bool | None = None,
+        opacity: float | None = None,
     ) -> None:
         if field not in _EDITABLE_META:
             raise KeyError(field)
@@ -211,6 +260,12 @@ class EditSessionStore:
             except (TypeError, ValueError):
                 value = 1.0
             values[f"{field}_scale"] = min(1.6, max(0.7, value))
+        if font is not None:
+            values[f"{field}_font"] = coerce_font_family(font)
+        if bold is not None:
+            values[f"{field}_bold"] = bool(bold)
+        if opacity is not None:
+            values[f"{field}_opacity"] = coerce_field_opacity(opacity, 1.0)
         self._store(key, values)
 
     def set_layout_patch(self, photo_path: str | Path | None, layout_patch: dict[str, Any]) -> None:
