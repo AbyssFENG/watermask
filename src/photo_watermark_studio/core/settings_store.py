@@ -108,6 +108,14 @@ FIELD_POSITION_KEYS = (
 # 自定义自由摆放：细网格步长（归一化）。
 FIELD_GRID_STEP = 0.01
 
+EXPORT_FORMATS = ("jpg", "png", "webp", "tiff")
+EXPORT_FORMAT_EXTS = {
+    "jpg": ".jpg",
+    "png": ".png",
+    "webp": ".webp",
+    "tiff": ".tif",
+}
+
 
 def default_layout() -> dict[str, Any]:
     return {
@@ -173,6 +181,11 @@ def default_settings() -> dict[str, Any]:
         "brand_opacity": 1.0,
         "caption_opacity": 1.0,
         "quality": 95,
+        "export_format": "jpg",
+        "png_compress": 6,
+        "webp_quality": 90,
+        "keep_exif": True,
+        "keep_icc": True,
         "layout": default_layout(),
         "conflict_policy": "number",
     }
@@ -239,6 +252,24 @@ def coerce_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     except (TypeError, ValueError):
         quality = 95
     data["quality"] = min(100, max(80, quality))
+    fmt = str(raw.get("export_format", base["export_format"]) or base["export_format"]).strip().lower()
+    if fmt == "jpeg":
+        fmt = "jpg"
+    if fmt == "tif":
+        fmt = "tiff"
+    data["export_format"] = fmt if fmt in EXPORT_FORMATS else base["export_format"]
+    try:
+        png_compress = int(float(raw.get("png_compress", base["png_compress"])))
+    except (TypeError, ValueError):
+        png_compress = int(base["png_compress"])
+    data["png_compress"] = min(9, max(0, png_compress))
+    try:
+        webp_quality = int(float(raw.get("webp_quality", base["webp_quality"])))
+    except (TypeError, ValueError):
+        webp_quality = int(base["webp_quality"])
+    data["webp_quality"] = min(100, max(1, webp_quality))
+    data["keep_exif"] = bool(raw.get("keep_exif", base["keep_exif"]))
+    data["keep_icc"] = bool(raw.get("keep_icc", base["keep_icc"]))
     output_dir = str(raw.get("output_dir", "") or "").strip()
     data["output_dir"] = output_dir or str(base["output_dir"])
     browse_dir = str(raw.get("browse_dir", "") or "").strip()

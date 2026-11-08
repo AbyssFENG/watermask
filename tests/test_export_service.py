@@ -12,7 +12,8 @@ _existing = sys.modules.get("photo_watermark_studio")
 if _existing is not None and not hasattr(_existing, "__path__"):
     del sys.modules["photo_watermark_studio"]
 
-from PIL import Image
+from PIL import Image, ImageCms
+from PIL.ExifTags import Base as ExifBase
 
 from photo_watermark_studio.core.export_service import allocate_output_path, export_image
 from photo_watermark_studio.core.settings_store import coerce_settings, load_settings, save_settings
@@ -30,7 +31,29 @@ OPTIONS = {
     "show_date": False,
     "show_gps": False,
     "show_brand_text": False,
+    "export_format": "jpg",
+    "png_compress": 6,
+    "webp_quality": 90,
+    "keep_exif": True,
+    "keep_icc": True,
 }
+
+
+def _srgb_icc() -> bytes:
+    return ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+
+
+def _save_jpeg_with_meta(path: Path, *, with_exif: bool = True, with_icc: bool = True) -> None:
+    image = Image.new("RGB", (48, 36), (20, 40, 60))
+    kwargs: dict = {"quality": 90}
+    if with_exif:
+        exif = Image.Exif()
+        exif[ExifBase.Orientation] = 1
+        exif[ExifBase.Make] = "TestCam"
+        kwargs["exif"] = exif.tobytes()
+    if with_icc:
+        kwargs["icc_profile"] = _srgb_icc()
+    image.save(path, "JPEG", **kwargs)
 
 
 class _TempCase(unittest.TestCase):
@@ -126,6 +149,91 @@ class ExportImageTests(_TempCase):
         self.assertEqual(first.read_bytes(), first_before)
         self.assertEqual(second.read_bytes(), second_before)
 
+    def test_export_formats_use_expected_extension_and_pillow_format(self) -> None:
+        root = self.root / "formats"
+        output_dir = root / "out"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        source = root / "scene.jpg"
+        Image.new("RGB", (64, 48), (10, 20, 30)).save(source, quality=90)
+        cases = (
+            ("jpg", "scene_watermark.jpg", "JPEG"),
+            ("png", "scene_watermark.png", "PNG"),
+            ("webp", "scene_watermark.webp", "WEBP"),
+            ("tiff", "scene_watermark.tif", "TIFF"),
+        )
+        for fmt, name, pillow_fmt in cases:
+            options = dict(OPTIONS)
+            options["export_format"] = fmt
+            saved = Path(export_image(source, output_dir, options, 90))
+            self.assertEqual(saved.name, name)
+            with Image.open(saved) as image:
+                self.assertEqual(image.format, pillow_fmt)
+
+    def test_allocate_output_path_respects_extension(self) -> None:
+        folder = self.root / "ext"
+        folder.mkdir(parents=True, exist_ok=True)
+        source = folder / "photo.png"
+        Image.new("RGB", (8, 8), "black").save(source)
+        (folder / "photo_watermark.png").write_bytes(b"old")
+        chosen = allocate_output_path(source, folder, ext=".png")
+        self.assertEqual(chosen.name, "photo_watermark_2.png")
+
+    def test_keep_exif_false_drops_exif(self) -> None:
+        root = self.root / "exif"
+        output_dir = root / "out"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        source = root / "meta.jpg"
+        _save_jpeg_with_meta(source, with_exif=True, with_icc=False)
+        with Image.open(source) as src:
+            self.assertTrue(bool(src.getexif()))
+        options = dict(OPTIONS)
+        options["keep_exif"] = False
+        options["keep_icc"] = False
+        saved = Path(export_image(source, output_dir, options, 90))
+        with Image.open(saved) as image:
+            self.assertFalse(bool(image.getexif()))
+
+    def test_keep_icc_true_and_false(self) -> None:
+        root = self.root / "icc"
+        output_dir = root / "out"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        source = root / "profile.jpg"
+        _save_jpeg_with_meta(source, with_exif=False, with_icc=True)
+        with Image.open(source) as src:
+            self.assertTrue(bool(src.info.get("icc_profile")))
+
+        kept = dict(OPTIONS)
+        kept["keep_icc"] = True
+        kept["keep_exif"] = False
+        kept_path = Path(export_image(source, output_dir, kept, 90))
+        with Image.open(kept_path) as image:
+            self.assertTrue(bool(image.info.get("icc_profile")))
+
+        dropped = dict(OPTIONS)
+        dropped["keep_icc"] = False
+        dropped["keep_exif"] = False
+        dropped["conflict_policy"] = "number"
+        # Force a distinct name by pre-creating the default target.
+        (output_dir / "profile_watermark.jpg").write_bytes(b"x")
+        dropped_path = Path(export_image(source, output_dir, dropped, 90))
+        with Image.open(dropped_path) as image:
+            self.assertFalse(bool(image.info.get("icc_profile")))
+
+    def test_bad_icc_bytes_still_export(self) -> None:
+        root = self.root / "bad-icc"
+        output_dir = root / "out"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        source = root / "weird.jpg"
+        image = Image.new("RGB", (32, 24), (1, 2, 3))
+        image.save(source, "JPEG", quality=90, icc_profile=b"not-a-real-icc-profile")
+        options = dict(OPTIONS)
+        options["keep_icc"] = True
+        saved = Path(export_image(source, output_dir, options, 90))
+        self.assertTrue(saved.is_file())
+        with Image.open(saved) as out:
+            self.assertEqual(out.format, "JPEG")
+            self.assertEqual(out.size[0], 32)
+
 
 class SettingsStoreTests(_TempCase):
     def test_round_trip_and_invalid_values(self) -> None:
@@ -194,6 +302,29 @@ class SettingsStoreTests(_TempCase):
         loaded = load_settings(path)
         self.assertEqual(loaded["style"], coerce_settings(None)["style"])
         self.assertEqual(loaded["quality"], 95)
+        self.assertEqual(loaded["export_format"], "jpg")
+        self.assertTrue(loaded["keep_exif"])
+        self.assertTrue(loaded["keep_icc"])
+
+    def test_export_settings_coercion(self) -> None:
+        data = coerce_settings(
+            {
+                "export_format": "JPEG",
+                "png_compress": 99,
+                "webp_quality": 0,
+                "keep_exif": 0,
+                "keep_icc": 1,
+            }
+        )
+        self.assertEqual(data["export_format"], "jpg")
+        self.assertEqual(data["png_compress"], 9)
+        self.assertEqual(data["webp_quality"], 1)
+        self.assertFalse(data["keep_exif"])
+        self.assertTrue(data["keep_icc"])
+        bad = coerce_settings({"export_format": "bmp", "png_compress": "x", "webp_quality": "y"})
+        self.assertEqual(bad["export_format"], "jpg")
+        self.assertEqual(bad["png_compress"], 6)
+        self.assertEqual(bad["webp_quality"], 90)
 
 
 if __name__ == "__main__":

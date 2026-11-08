@@ -85,10 +85,15 @@ class WindowSmokeTests(unittest.TestCase):
         window.settings.set_state(state)
         window.controller.apply_settings(window.settings.state())
         window.controller.save_current()
+        self.assertTrue(
+            _wait_until(lambda: not window.controller._exporting, 30000),
+            "单张导出超时",
+        )
         saved = output_dir / "photo_watermark.jpg"
         self.assertTrue(saved.is_file())
         self.assertEqual(photo.read_bytes(), original)
         self.assertEqual(window.last_notice[0], "info")
+        self.assertEqual(window.last_notice[1], "导出成功")
         with Image.open(saved) as image:
             self.assertEqual(image.size[0], 240)
 

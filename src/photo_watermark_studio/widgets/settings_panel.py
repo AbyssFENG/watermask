@@ -349,7 +349,20 @@ class SettingsPanel(QFrame):
         g_export.add(self._label("导出目录"))
         g_export.add(self.output_label)
         g_export.add(self.output_button)
-        quality_row = QHBoxLayout()
+        self.format_combo = _NoWheelComboBox()
+        self.format_combo.setObjectName("exportFormatCombo")
+        self.format_combo.addItem("JPG", "jpg")
+        self.format_combo.addItem("PNG", "png")
+        self.format_combo.addItem("WEBP", "webp")
+        self.format_combo.addItem("TIFF", "tiff")
+        self.format_combo.currentIndexChanged.connect(self._on_export_format_changed)
+        g_export.add(self._label("导出格式"))
+        g_export.add(self.format_combo)
+
+        self.quality_row = QWidget()
+        self.quality_row.setObjectName("jpgQualityRow")
+        quality_row = QHBoxLayout(self.quality_row)
+        quality_row.setContentsMargins(0, 0, 0, 0)
         self.quality_slider = _NoWheelSlider(Qt.Orientation.Horizontal)
         self.quality_slider.setObjectName("qualitySlider")
         self.quality_slider.setRange(80, 100)
@@ -360,7 +373,47 @@ class SettingsPanel(QFrame):
         quality_row.addWidget(self._label("JPG 质量"))
         quality_row.addWidget(self.quality_slider, 1)
         quality_row.addWidget(self.quality_value)
-        g_export.body_layout.addLayout(quality_row)
+        g_export.add(self.quality_row)
+
+        self.png_compress_row = QWidget()
+        self.png_compress_row.setObjectName("pngCompressRow")
+        png_row = QHBoxLayout(self.png_compress_row)
+        png_row.setContentsMargins(0, 0, 0, 0)
+        self.png_compress_slider = _NoWheelSlider(Qt.Orientation.Horizontal)
+        self.png_compress_slider.setObjectName("pngCompressSlider")
+        self.png_compress_slider.setRange(0, 9)
+        self.png_compress_slider.setValue(6)
+        self.png_compress_slider.valueChanged.connect(self._on_png_compress)
+        self.png_compress_value = QLabel("6")
+        self.png_compress_value.setObjectName("ValueLabel")
+        png_row.addWidget(self._label("PNG 压缩"))
+        png_row.addWidget(self.png_compress_slider, 1)
+        png_row.addWidget(self.png_compress_value)
+        g_export.add(self.png_compress_row)
+
+        self.webp_quality_row = QWidget()
+        self.webp_quality_row.setObjectName("webpQualityRow")
+        webp_row = QHBoxLayout(self.webp_quality_row)
+        webp_row.setContentsMargins(0, 0, 0, 0)
+        self.webp_quality_slider = _NoWheelSlider(Qt.Orientation.Horizontal)
+        self.webp_quality_slider.setObjectName("webpQualitySlider")
+        self.webp_quality_slider.setRange(1, 100)
+        self.webp_quality_slider.setValue(90)
+        self.webp_quality_slider.valueChanged.connect(self._on_webp_quality)
+        self.webp_quality_value = QLabel("90")
+        self.webp_quality_value.setObjectName("ValueLabel")
+        webp_row.addWidget(self._label("WEBP 质量"))
+        webp_row.addWidget(self.webp_quality_slider, 1)
+        webp_row.addWidget(self.webp_quality_value)
+        g_export.add(self.webp_quality_row)
+
+        self.keep_exif = self._check("保留 EXIF", "keepExifCheck")
+        self.keep_icc = self._check("保留 ICC 色彩配置", "keepIccCheck")
+        self.keep_exif.setChecked(True)
+        self.keep_icc.setChecked(True)
+        g_export.add(self.keep_exif)
+        g_export.add(self.keep_icc)
+
         self.conflict_combo = _NoWheelComboBox()
         self.conflict_combo.setObjectName("conflictCombo")
         self.conflict_combo.addItem("重名时自动编号", "number")
@@ -369,6 +422,7 @@ class SettingsPanel(QFrame):
         g_export.add(self._label("文件冲突"))
         g_export.add(self.conflict_combo)
         form.addWidget(g_export)
+        self._update_export_format_ui()
         form.addStretch(1)
 
         scroll.setWidget(body)
@@ -388,12 +442,18 @@ class SettingsPanel(QFrame):
             self.show_logo,
             self.show_brand_text,
             self.scale_slider,
+            self.format_combo,
             self.quality_slider,
+            self.png_compress_slider,
+            self.webp_quality_slider,
+            self.keep_exif,
+            self.keep_icc,
             self.opacity_spin,
             self.conflict_combo,
         ]
         self._update_logo_label()
         self._update_style_dependent_ui()
+        self._update_export_format_ui()
 
     def _label(self, text: str) -> QLabel:
         label = QLabel(text)
@@ -546,6 +606,24 @@ class SettingsPanel(QFrame):
     def _on_quality(self, value: int) -> None:
         self.quality_value.setText(str(int(value)))
         self._emit()
+
+    def _on_png_compress(self, value: int) -> None:
+        self.png_compress_value.setText(str(int(value)))
+        self._emit()
+
+    def _on_webp_quality(self, value: int) -> None:
+        self.webp_quality_value.setText(str(int(value)))
+        self._emit()
+
+    def _on_export_format_changed(self, *_args: object) -> None:
+        self._update_export_format_ui()
+        self._emit()
+
+    def _update_export_format_ui(self, *_args: object) -> None:
+        fmt = str(self.format_combo.currentData() or "jpg")
+        self.quality_row.setVisible(fmt == "jpg")
+        self.png_compress_row.setVisible(fmt == "png")
+        self.webp_quality_row.setVisible(fmt == "webp")
 
     def _update_logo_label(self) -> None:
         path = self._logo_path
@@ -722,6 +800,11 @@ class SettingsPanel(QFrame):
             "show_gps": self.show_gps.isChecked(),
             "show_brand_text": self.show_brand_text.isChecked(),
             "quality": self.quality_slider.value(),
+            "export_format": self.format_combo.currentData(),
+            "png_compress": self.png_compress_slider.value(),
+            "webp_quality": self.webp_quality_slider.value(),
+            "keep_exif": self.keep_exif.isChecked(),
+            "keep_icc": self.keep_icc.isChecked(),
             "output_dir": self._output_dir,
             "layout": layout,
             "conflict_policy": self.conflict_combo.currentData(),
@@ -786,6 +869,15 @@ class SettingsPanel(QFrame):
                 )
             self.quality_slider.setValue(int(data["quality"]))
             self.quality_value.setText(str(self.quality_slider.value()))
+            fmt = str(data.get("export_format", "jpg"))
+            fidx = self.format_combo.findData(fmt)
+            self.format_combo.setCurrentIndex(fidx if fidx >= 0 else 0)
+            self.png_compress_slider.setValue(int(data.get("png_compress", 6)))
+            self.png_compress_value.setText(str(self.png_compress_slider.value()))
+            self.webp_quality_slider.setValue(int(data.get("webp_quality", 90)))
+            self.webp_quality_value.setText(str(self.webp_quality_slider.value()))
+            self.keep_exif.setChecked(bool(data.get("keep_exif", True)))
+            self.keep_icc.setChecked(bool(data.get("keep_icc", True)))
             self._logo_path = str(data["logo_path"])
             self._update_logo_label()
             self._output_dir = str(data["output_dir"])
@@ -797,6 +889,7 @@ class SettingsPanel(QFrame):
             pidx = self.conflict_combo.findData(policy)
             self.conflict_combo.setCurrentIndex(pidx if pidx >= 0 else 0)
             self._update_style_dependent_ui()
+            self._update_export_format_ui()
         finally:
             for widget in self._inputs:
                 widget.blockSignals(False)

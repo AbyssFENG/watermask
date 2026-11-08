@@ -31,6 +31,11 @@ def _template_settings_snapshot(raw: dict[str, Any] | None) -> dict[str, Any]:
     keep = {key: data[key] for key in OPTION_KEYS}
     keep["layout"] = data["layout"]
     keep["quality"] = data["quality"]
+    keep["export_format"] = data["export_format"]
+    keep["png_compress"] = data["png_compress"]
+    keep["webp_quality"] = data["webp_quality"]
+    keep["keep_exif"] = data["keep_exif"]
+    keep["keep_icc"] = data["keep_icc"]
     keep["conflict_policy"] = data["conflict_policy"]
     for key in TEXT_KEYS:
         keep[key] = ""

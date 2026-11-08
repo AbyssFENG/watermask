@@ -9,7 +9,6 @@ from PySide6.QtCore import QCoreApplication, QObject, QThreadPool, QTimer, Signa
 from PySide6.QtGui import QImage
 from photo_watermark_studio.core.document import WatermarkDocument
 from photo_watermark_studio.core.edit_session import EditSessionStore
-from photo_watermark_studio.core.export_service import export_image
 from photo_watermark_studio.core.history import EditHistory
 from photo_watermark_studio.core.metadata import read_photo_metadata
 from photo_watermark_studio.core.models import SUPPORTED_EXTS
@@ -62,6 +61,11 @@ class PhotoController(QObject):
         self.output_dir = str(stored["output_dir"])
         self.browse_dir = str(stored.get("browse_dir") or Path.home())
         self.quality = int(stored["quality"])
+        self.export_format = str(stored.get("export_format", "jpg") or "jpg")
+        self.png_compress = int(stored.get("png_compress", 6))
+        self.webp_quality = int(stored.get("webp_quality", 90))
+        self.keep_exif = bool(stored.get("keep_exif", True))
+        self.keep_icc = bool(stored.get("keep_icc", True))
         self.conflict_policy = str(stored.get("conflict_policy", "number") or "number")
         self.document = WatermarkDocument(stored)
         self.options = self.document.render_options()
@@ -86,6 +90,8 @@ class PhotoController(QObject):
         self._closing = False
         self._exporting = False
         self._export_token = CancelToken()
+        self._export_paths: list[str] = []
+        self._export_kind = "batch"
         self._active_preview: PreviewRunnable | None = None
         self._active_export: ExportRunnable | None = None
         self._compare_mode = False
@@ -133,6 +139,11 @@ class PhotoController(QObject):
     def snapshot(self) -> dict[str, Any]:
         data = self.document.settings_payload()
         data["quality"] = self.quality
+        data["export_format"] = self.export_format
+        data["png_compress"] = self.png_compress
+        data["webp_quality"] = self.webp_quality
+        data["keep_exif"] = self.keep_exif
+        data["keep_icc"] = self.keep_icc
         data["output_dir"] = self.output_dir
         data["browse_dir"] = self.browse_dir
         data["conflict_policy"] = self.conflict_policy
@@ -159,6 +170,11 @@ class PhotoController(QObject):
         changed = next_doc.settings_payload() != self.document.settings_payload()
         changed_other = (
             int(normalized["quality"]) != self.quality
+            or str(normalized.get("export_format", "jpg")) != self.export_format
+            or int(normalized.get("png_compress", 6)) != self.png_compress
+            or int(normalized.get("webp_quality", 90)) != self.webp_quality
+            or bool(normalized.get("keep_exif", True)) != self.keep_exif
+            or bool(normalized.get("keep_icc", True)) != self.keep_icc
             or str(normalized["output_dir"]) != self.output_dir
             or browse_dir != self.browse_dir
             or str(normalized.get("conflict_policy", "number")) != self.conflict_policy
@@ -168,6 +184,11 @@ class PhotoController(QObject):
         self.document = next_doc
         self.options = self.document.render_options()
         self.quality = int(normalized["quality"])
+        self.export_format = str(normalized.get("export_format", "jpg") or "jpg")
+        self.png_compress = int(normalized.get("png_compress", 6))
+        self.webp_quality = int(normalized.get("webp_quality", 90))
+        self.keep_exif = bool(normalized.get("keep_exif", True))
+        self.keep_icc = bool(normalized.get("keep_icc", True))
         self.output_dir = str(normalized["output_dir"])
         self.browse_dir = browse_dir
         self.conflict_policy = str(normalized.get("conflict_policy", "number") or "number")
@@ -461,33 +482,15 @@ class PhotoController(QObject):
             self._start_preview(self._request_id)
 
     def save_current(self) -> None:
+        if self._exporting:
+            return
         if not self.current_path:
             self.notice.emit("info", "提示", "请先添加并选择一张照片。")
             return
         if not str(self.output_dir).strip():
             self.notice.emit("info", "提示", "请先选择导出目录。")
             return
-        path = self.current_path
-        self.photo_status[path] = "exporting"
-        self._emit_statuses()
-        self.statusChanged.emit("正在导出当前照片…")
-        try:
-            options = self.render_options(path)
-            saved = export_image(path, self.output_dir, options, self.quality)
-        except Exception as exc:
-            self.photo_status[path] = "failed"
-            self.photo_errors[path] = str(exc)
-            self._emit_statuses()
-            self.statusChanged.emit(f"导出失败：{exc}")
-            self.notice.emit("error", "导出失败", f"处理图片时发生错误：\n{exc}")
-            return
-        self.photo_status[path] = "done"
-        self.photo_errors.pop(path, None)
-        self.edit_session.clear_photo(path)
-        self._emit_statuses()
-        self._emit_summary()
-        self.statusChanged.emit(f"已保存：{saved}")
-        self.notice.emit("info", "导出成功", f"水印图片已保存到：\n{saved}")
+        self._start_export([self.current_path], "single")
 
     def export_all(self) -> None:
         if self._exporting:
@@ -498,11 +501,19 @@ class PhotoController(QObject):
         if not str(self.output_dir).strip():
             self.notice.emit("info", "提示", "请先选择导出目录。")
             return
+        self._start_export(list(self.files), "batch")
+
+    def _start_export(self, paths: list[str], kind: str) -> None:
+        if self._exporting or not paths:
+            return
         self._exporting = True
+        self._export_kind = kind if kind in ("single", "batch") else "batch"
+        self._export_paths = list(paths)
         self._export_token = CancelToken()
         self.exportRunningChanged.emit(True)
-        for path in self.files:
+        for path in self._export_paths:
             self.photo_status[path] = "exporting"
+            self.photo_errors.pop(path, None)
         self._emit_statuses()
         signals = ExportSignals(self)
         signals.progress.connect(self._on_export_progress)
@@ -513,8 +524,13 @@ class PhotoController(QObject):
         for key in FIELD_SCALE_KEYS:
             base_options[key] = 1.0
         base_options["conflict_policy"] = self.conflict_policy
+        base_options["export_format"] = self.export_format
+        base_options["png_compress"] = self.png_compress
+        base_options["webp_quality"] = self.webp_quality
+        base_options["keep_exif"] = self.keep_exif
+        base_options["keep_icc"] = self.keep_icc
         runnable = ExportRunnable(
-            self.files,
+            self._export_paths,
             self.output_dir,
             base_options,
             self.quality,
@@ -524,7 +540,11 @@ class PhotoController(QObject):
         )
         self._active_export = runnable
         self._export_pool.start(runnable)
-        self.statusChanged.emit(f"正在批量处理 0/{len(self.files)}…")
+        total = len(self._export_paths)
+        if self._export_kind == "single":
+            self.statusChanged.emit(f"正在导出当前照片… 0/{total}")
+        else:
+            self.statusChanged.emit(f"正在批量处理 0/{total}…")
 
     def cancel_export(self) -> None:
         if not self._exporting:
@@ -639,25 +659,40 @@ class PhotoController(QObject):
             self.statusChanged.emit(status)
 
     def _on_export_progress(self, index: int, total: int, succeeded: int) -> None:
-        if 0 < index <= len(self.files):
-            path = self.files[index - 1]
-            # 进度回调时该张已处理完（成功或失败在 finished 汇总）。
+        if 0 < index <= len(self._export_paths):
+            path = self._export_paths[index - 1]
+            # 本张已处理完；失败在 finished 用 errors 校正。
             if self.photo_status.get(path) == "exporting":
-                self.photo_status[path] = "done" if succeeded >= index else self.photo_status.get(path, "pending")
-        self.statusChanged.emit(f"批量处理中 {index}/{total} · 成功 {succeeded} 张")
+                self.photo_status[path] = "done"
+        if self._export_kind == "single":
+            self.statusChanged.emit(f"正在导出当前照片… {index}/{total}")
+        else:
+            self.statusChanged.emit(f"批量处理中 {index}/{total} · 成功 {succeeded} 张")
+        self._emit_statuses()
         self._emit_summary()
 
-    def _on_export_finished(self, succeeded: int, total: int, errors: object, cancelled: int) -> None:
+    def _on_export_finished(
+        self,
+        succeeded: int,
+        total: int,
+        errors: object,
+        cancelled: int,
+        saved_paths: object = None,
+    ) -> None:
+        kind = self._export_kind
+        export_paths = list(self._export_paths)
         self._exporting = False
         self._active_export = None
+        self._export_paths = []
         sender = self.sender()
         if sender is not None:
             sender.deleteLater()
         if self._closing:
             return
         error_list = [str(item) for item in errors] if isinstance(errors, list) else []
+        saved_list = [str(item) for item in saved_paths] if isinstance(saved_paths, list) else []
         failed_names = {item.split(":", 1)[0].strip() for item in error_list}
-        for path in self.files:
+        for path in export_paths:
             name = Path(path).name
             if name in failed_names:
                 self.photo_status[path] = "failed"
@@ -670,9 +705,44 @@ class PhotoController(QObject):
                     self.photo_status[path] = "pending"
                 else:
                     self.photo_status[path] = "done"
-        self.clear_edit_session()
+            elif self.photo_status.get(path) == "done" and name in failed_names:
+                self.photo_status[path] = "failed"
+
         folder = self.output_dir
         self.exportRunningChanged.emit(False)
+
+        if kind == "single":
+            path = export_paths[0] if export_paths else ""
+            if cancelled and succeeded == 0 and not error_list:
+                if path:
+                    self.photo_status[path] = "pending"
+                self._emit_statuses()
+                self._emit_summary()
+                self.statusChanged.emit("已取消导出当前照片。")
+                self.notice.emit("warn", "导出已取消", "当前照片导出已取消。")
+                return
+            if error_list:
+                detail = error_list[0]
+                self._emit_statuses()
+                self._emit_summary()
+                self.statusChanged.emit(f"导出失败：{detail}")
+                self.notice.emit("error", "导出失败", f"处理图片时发生错误：\n{detail}")
+                return
+            saved = saved_list[0] if saved_list else ""
+            if path:
+                self.photo_errors.pop(path, None)
+                self.edit_session.clear_photo(path)
+            self._emit_statuses()
+            self._emit_summary()
+            if saved:
+                self.statusChanged.emit(f"已保存：{saved}")
+                self.notice.emit("info", "导出成功", f"水印图片已保存到：\n{saved}")
+            else:
+                self.statusChanged.emit("导出完成。")
+                self.notice.emit("info", "导出成功", f"水印图片已保存到：\n{folder}")
+            return
+
+        self.clear_edit_session()
         self._emit_statuses()
         self._emit_summary()
         if cancelled:

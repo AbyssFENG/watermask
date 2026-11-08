@@ -7,7 +7,6 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
-    QApplication,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -496,7 +495,7 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.warning(
                 self,
                 "覆盖确认",
-                "当前冲突策略为覆盖已有水印文件。原图不会被覆盖，但同名 *_watermark.jpg 会被替换。是否继续？",
+                "当前冲突策略为覆盖已有水印文件。原图不会被覆盖，但同名 *_watermark.* 会被替换。是否继续？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
@@ -504,11 +503,7 @@ class MainWindow(QMainWindow):
         self.controller.export_all()
 
     def _save_current(self) -> None:
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            self.controller.save_current()
-        finally:
-            QApplication.restoreOverrideCursor()
+        self.controller.save_current()
 
     def _about(self) -> None:
         QMessageBox.information(
@@ -522,7 +517,7 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "正在导出",
-                "批量导出仍在进行。关闭将取消后续任务。是否关闭？",
+                "导出仍在进行。关闭将取消后续任务。是否关闭？",
             )
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()

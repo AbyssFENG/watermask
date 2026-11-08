@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""后台批量导出。界面控件只在主线程更新。"""
+"""后台导出（单张 / 批量共用）。界面控件只在主线程更新。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -18,7 +18,8 @@ class CancelToken:
 
 class ExportSignals(QObject):
     progress = Signal(int, int, int)
-    finished = Signal(int, int, object, int)
+    # succeeded, total, errors, cancelled, saved_paths
+    finished = Signal(int, int, object, int, object)
 
 
 class ExportRunnable(QRunnable):
@@ -45,6 +46,7 @@ class ExportRunnable(QRunnable):
         succeeded = 0
         errors: list[str] = []
         cancelled = 0
+        saved_paths: list[str] = []
         total = len(self.paths)
         try:
             for index, path in enumerate(self.paths, start=1):
@@ -53,11 +55,12 @@ class ExportRunnable(QRunnable):
                     break
                 try:
                     options = merge_photo_overrides(self.options, path, self.photo_overrides)
-                    export_image(path, self.output_dir, options, self.quality)
+                    saved = export_image(path, self.output_dir, options, self.quality)
+                    saved_paths.append(str(saved))
                     succeeded += 1
                 except Exception as exc:
                     errors.append(f"{Path(path).name}: {exc}")
                 self.signals.progress.emit(index, total, succeeded)
         except Exception as exc:
             errors.append(str(exc))
-        self.signals.finished.emit(succeeded, total, errors, cancelled)
+        self.signals.finished.emit(succeeded, total, errors, cancelled, saved_paths)
