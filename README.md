@@ -1,10 +1,10 @@
-# 光影水印 Photo Watermark Studio 2.0（Windows 桌面版）
+# 光影水印 Photo Watermark Studio 3.0（Windows 桌面版）
 
 本地照片元数据水印工具。程序在本机处理图片，不会把照片上传到网络。
 
 当前界面使用 **PySide6**。图片读取、EXIF 和水印合成由 **Pillow** 完成。原来的 Tkinter 程序保留在上级目录 [`../photo_watermark_studio.py`](../photo_watermark_studio.py)，对照备份在 `backup/tkinter_mvp_2026-10-28.py`。
 
-## 2.0 当前能力
+## 3.0 当前能力
 
 - 三栏工作台：左侧缩略图素材区、中间画布预览、右侧分组属性面板。
 - 导入多张照片或文件夹；支持拖入素材区；搜索与排序；网格/列表视图。
