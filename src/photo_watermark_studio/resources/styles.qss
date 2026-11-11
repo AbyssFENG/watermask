@@ -333,8 +333,8 @@ QGraphicsView#CanvasView {
 
 QFrame#FieldEditorBar {
     background: #F8FAFD;
-    border: 1px solid #E5EAF1;
-    border-radius: 10px;
+    border: 1px solid #E3E8F0;
+    border-radius: 14px;
 }
 
 QComboBox#watermarkFontCombo {
@@ -373,6 +373,25 @@ QToolButton#watermarkBoldButton:checked {
     color: #FFFFFF;
 }
 
+QToolButton#watermarkItalicButton {
+    background: #FFFFFF;
+    border: 1px solid #D5DCE6;
+    border-radius: 8px;
+    color: #1F2A3A;
+    font-style: italic;
+    font-weight: 700;
+}
+
+QToolButton#watermarkItalicButton:hover {
+    border-color: #A8B4C4;
+}
+
+QToolButton#watermarkItalicButton:checked {
+    background: #1F2A3A;
+    border-color: #1F2A3A;
+    color: #FFFFFF;
+}
+
 QSpinBox#watermarkOpacitySpin {
     background: #FFFFFF;
     border: 1px solid #D5DCE6;
@@ -393,4 +412,690 @@ QListWidget#fileList {
     border: 1px solid #E5EAF1;
     border-radius: 10px;
     padding: 6px;
+}
+
+/* --- 停下时光 Studio --- */
+QMainWindow, QWidget#AppRoot {
+    color: #20232B;
+    background: qradialgradient(cx:0.12, cy:0.04, radius:1.15,
+        fx:0.12, fy:0.04, stop:0 #DCE7FF, stop:0.34 #EDF1F8,
+        stop:0.72 #E9EDF4, stop:1 #E5EAF2);
+}
+
+QWidget#TopBar, QWidget#WorkspaceHead, QFrame#StudioSidebar,
+QFrame#CanvasShell, QFrame#ImageRail, QFrame#Panel {
+    background: rgba(255, 255, 255, 190);
+    border: 1px solid rgba(255, 255, 255, 235);
+    border-radius: 18px;
+}
+
+QWidget#TopBar {
+    border-radius: 17px;
+}
+
+QLabel#LogoMark {
+    color: white;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #7889EF, stop:1 #B09BF4);
+    border-radius: 10px;
+    font-size: 17px;
+}
+
+QLabel#AppTitle {
+    color: #262A35;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+QLabel#AppSubtitle {
+    color: #9BA1AD;
+    font-size: 9px;
+    letter-spacing: 1px;
+}
+
+QLabel#SavedState {
+    color: #65A486;
+    background: transparent;
+    font-size: 11px;
+}
+
+QFrame#StudioSidebar {
+    min-width: 200px;
+}
+
+QLabel#SidebarSection {
+    color: #9BA1AD;
+    background: transparent;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 6px 8px 2px 8px;
+}
+
+QLabel#SidebarHint {
+    color: #999FAD;
+    background: transparent;
+    font-size: 10px;
+    padding: 4px 8px;
+}
+
+QPushButton#SidebarNav {
+    color: #687080;
+    background: transparent;
+    border: none;
+    border-radius: 11px;
+    padding: 9px 10px;
+    text-align: left;
+}
+
+QPushButton#SidebarNav:hover, QPushButton#SidebarNav[active="true"] {
+    color: #4D5BC0;
+    background: rgba(255, 255, 255, 225);
+}
+
+QPushButton#TemplateCard {
+    color: #606878;
+    background: rgba(255, 255, 255, 105);
+    border: 1px solid transparent;
+    border-radius: 13px;
+    padding: 6px;
+    font-size: 10px;
+    text-align: left;
+}
+
+QToolButton#TemplateCard {
+    color: #606878;
+    background: rgba(255, 255, 255, 105);
+    border: 1px solid transparent;
+    border-radius: 13px;
+    padding: 6px;
+    font-size: 10px;
+}
+
+QToolButton#TemplateCard:hover {
+    background: rgba(255, 255, 255, 205);
+    border-color: #C8CEF4;
+}
+
+QToolButton#TemplateCard:checked {
+    color: #4D5BC0;
+    background: #FFFFFF;
+    border: 1px solid #8792E9;
+}
+
+QPushButton#TopNav {
+    color: #737989;
+    background: transparent;
+    border: none;
+    border-radius: 11px;
+    padding: 8px 12px;
+}
+
+QPushButton#TopNav:hover {
+    color: #4D5BC0;
+    background: rgba(255, 255, 255, 145);
+}
+
+QPushButton#TopNav:checked {
+    color: #3F4EAA;
+    background: #FFFFFF;
+    font-weight: 700;
+}
+
+QLabel#Avatar {
+    color: #FFFFFF;
+    background: #B5B8EF;
+    border-radius: 15px;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+QPushButton#TemplateCard:hover {
+    background: rgba(255, 255, 255, 190);
+    border-color: #C8CEF4;
+}
+
+QPushButton#TemplateCard:checked {
+    color: #4D5BC0;
+    background: #FFFFFF;
+    border: 1px solid #8792E9;
+}
+
+QWidget#WorkspaceHead {
+    min-height: 48px;
+    max-height: 48px;
+    border-radius: 16px;
+}
+
+QLabel#FileTitle {
+    color: #303541;
+    background: transparent;
+    font-weight: 700;
+    font-size: 12px;
+}
+
+QLabel#FileSubtitle {
+    color: #989EAA;
+    background: transparent;
+    font-size: 10px;
+}
+
+QPushButton#IconButton {
+    color: #727A8B;
+    background: rgba(255, 255, 255, 175);
+    border: 1px solid rgba(40, 48, 64, 22);
+    border-radius: 10px;
+    min-width: 32px;
+    max-width: 32px;
+    min-height: 30px;
+    max-height: 30px;
+    font-size: 17px;
+}
+
+QPushButton#IconButton:hover {
+    color: #4D5BC0;
+    background: #FFFFFF;
+}
+
+QPushButton[role="primary"] {
+    color: #FFFFFF;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #7181E7, stop:1 #8C83E8);
+    border: none;
+    border-radius: 11px;
+    padding: 8px 14px;
+    font-weight: 700;
+}
+
+QPushButton[role="primary"]:hover {
+    background: #6575DA;
+}
+
+QPushButton[role="soft"] {
+    color: #596172;
+    background: rgba(255, 255, 255, 150);
+    border: 1px solid rgba(40, 48, 64, 20);
+    border-radius: 10px;
+    padding: 7px 12px;
+}
+
+QPushButton[role="soft"]:hover {
+    color: #4D5BC0;
+    background: #FFFFFF;
+}
+
+QFrame#CanvasShell {
+    border-radius: 22px;
+}
+
+QGraphicsView#CanvasView {
+    background: #8B94A3;
+    border: none;
+    border-radius: 15px;
+}
+
+QFrame#CanvasToolsBar {
+    background: transparent;
+    border: none;
+}
+
+QLabel#CanvasCaption, QLabel#WorkspaceNote {
+    color: #9298A5;
+    background: transparent;
+    font-size: 10px;
+}
+
+QWidget#WorkspaceFooter {
+    background: transparent;
+    min-height: 18px;
+    max-height: 18px;
+}
+
+QFrame#ImageRail {
+    border-radius: 16px;
+}
+
+QFrame#ImageRail QListWidget#railList {
+    background: transparent;
+    border: none;
+    padding: 1px;
+}
+
+QFrame#ImageRail QListWidget#railList::item {
+    color: #737B8B;
+    background: rgba(255, 255, 255, 105);
+    border: 1px solid transparent;
+    border-radius: 10px;
+    padding: 4px;
+}
+
+QFrame#ImageRail QListWidget#railList::item:selected {
+    color: #4D5BC0;
+    background: #FFFFFF;
+    border: 1px solid #8490E7;
+}
+
+QWidget#InspectorTabs {
+    background: #E4E8F2;
+    border: none;
+    border-radius: 12px;
+}
+
+QPushButton#InspectorTab {
+    color: #858B9A;
+    background: transparent;
+    border: none;
+    border-radius: 9px;
+    padding: 8px 3px;
+    font-size: 12px;
+}
+
+QPushButton#InspectorTab:hover {
+    color: #4D5DBB;
+}
+
+QPushButton#InspectorTab:checked {
+    color: #4D5DBB;
+    background: #FFFFFF;
+    font-weight: 700;
+}
+
+QScrollArea, QWidget#SettingsBody {
+    background: transparent;
+    border: none;
+}
+
+QFrame#InspectorGroup {
+    background: transparent;
+    border-bottom: 1px solid rgba(40, 48, 64, 22);
+}
+
+QToolButton#InspectorGroupToggle {
+    color: #343A47;
+    font-size: 12px;
+}
+
+QPushButton#InspectorReset {
+    color: #727A8B;
+    background: rgba(255, 255, 255, 175);
+    border: 1px solid rgba(40, 48, 64, 22);
+    border-radius: 10px;
+    padding: 0;
+    font-size: 16px;
+}
+
+QPushButton#InspectorReset:hover {
+    color: #4D5DBB;
+    background: #FFFFFF;
+}
+
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+    color: #454C5A;
+    background: rgba(255, 255, 255, 190);
+    border: 1px solid #E5E8EF;
+    border-radius: 9px;
+}
+
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+    border: 1px solid #9BA5ED;
+}
+
+QSlider::sub-page:horizontal {
+    background: #7885DF;
+}
+
+QSlider::handle:horizontal {
+    background: #7885DF;
+}
+
+QWidget#StatusBar {
+    background: transparent;
+    border: none;
+}
+
+/* --- 检查面板分节与控件 --- */
+QWidget#InspectorPage {
+    background: transparent;
+}
+
+QFrame#ControlSection {
+    background: transparent;
+    border: none;
+    border-top: 1px solid rgba(40, 48, 64, 18);
+}
+
+QFrame#ControlSection[first="true"] {
+    border-top: none;
+}
+
+QLabel#ControlTitle {
+    color: #2C313C;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+QLabel#ControlHint {
+    color: #9BA1AD;
+    background: transparent;
+    font-size: 10px;
+}
+
+QLabel#FieldHead {
+    color: #687080;
+    background: transparent;
+    font-size: 11px;
+}
+
+QLabel#FieldValue {
+    color: #8D94A3;
+    background: transparent;
+    font-size: 10px;
+}
+
+QLabel#Notice {
+    color: #9AA0AC;
+    background: transparent;
+    font-size: 10px;
+}
+
+QWidget#ValueSliderRow, QWidget#PresetRow, QWidget#ColorSwatchRow {
+    background: transparent;
+}
+
+QPushButton#resetPhotoExifButton {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 7px;
+}
+
+QSlider::groove:horizontal {
+    height: 4px;
+    background: #E3E6EE;
+    border-radius: 2px;
+}
+
+QSlider::handle:horizontal {
+    width: 14px;
+    height: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+    background: #FFFFFF;
+    border: 2px solid #7885DF;
+}
+
+QSlider::sub-page:horizontal {
+    border-radius: 2px;
+}
+
+QWidget#Segment {
+    background: #ECEFF5;
+    border: none;
+    border-radius: 10px;
+}
+
+QPushButton#SegmentButton {
+    color: #858B98;
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 7px 4px;
+    font-size: 11px;
+}
+
+QPushButton#SegmentButton:hover {
+    color: #4D5CBA;
+}
+
+QPushButton#SegmentButton:checked {
+    color: #4D5CBA;
+    background: #FFFFFF;
+    font-weight: 700;
+}
+
+QPushButton#PresetButton {
+    color: #687080;
+    background: rgba(255, 255, 255, 160);
+    border: 1px solid #E5E8EF;
+    border-radius: 9px;
+    padding: 7px 4px;
+    font-size: 11px;
+}
+
+QPushButton#PresetButton:hover {
+    border-color: #C3C9F2;
+}
+
+QPushButton#PresetButton:checked {
+    color: #5262C0;
+    background: #F7F8FF;
+    border: 1px solid #9BA5ED;
+    font-weight: 700;
+}
+
+QLineEdit, QComboBox {
+    min-height: 32px;
+    padding: 0 10px;
+    font-size: 11px;
+}
+
+QLabel#PathLabel {
+    color: #8D94A3;
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-size: 10px;
+}
+
+QFrame#InspectorFooter {
+    background: transparent;
+    border: none;
+    border-top: 1px solid rgba(40, 48, 64, 18);
+}
+
+/* --- 左栏补充 --- */
+QPushButton#SidebarLink {
+    color: #A1A6B1;
+    background: transparent;
+    border: none;
+    padding: 6px 8px 2px 8px;
+    font-size: 10px;
+}
+
+QPushButton#SidebarLink:hover {
+    color: #4D5BC0;
+}
+
+QPushButton#SidebarNav:checked {
+    color: #4D5BC0;
+    background: rgba(255, 255, 255, 225);
+}
+
+QPushButton#SidebarNav[active="true"] {
+    font-weight: 700;
+}
+
+QPushButton#SidebarRecent {
+    color: #687080;
+    background: transparent;
+    border: none;
+    border-radius: 11px;
+    padding: 8px 10px;
+    text-align: left;
+    font-size: 11px;
+}
+
+QPushButton#SidebarRecent:hover {
+    color: #4D5BC0;
+    background: rgba(255, 255, 255, 225);
+}
+
+/* --- 画布底部工具条与空状态 --- */
+QFrame#CanvasToolsBar {
+    background: transparent;
+    border: none;
+}
+
+QPushButton[canvasTool="true"] {
+    color: #8E95A3;
+    background: transparent;
+    border: none;
+    border-radius: 10px;
+    padding: 2px 8px;
+    min-height: 0;
+    font-size: 12px;
+}
+
+QPushButton[canvasTool="true"]:hover {
+    color: #4D5BC0;
+    background: rgba(255, 255, 255, 200);
+}
+
+QPushButton[canvasTool="true"]:checked, QPushButton[canvasTool="true"][active="true"] {
+    color: #4D5BC0;
+    background: #FFFFFF;
+}
+
+QPushButton#zoomOutButton, QPushButton#zoomInButton {
+    font-size: 14px;
+    padding: 2px 8px;
+}
+
+QLabel#CanvasZoomCaption, QLabel#CanvasZoomValue, QLabel#CanvasToolDot {
+    color: #A0A6B2;
+    background: transparent;
+    font-size: 12px;
+}
+
+QLabel#CanvasZoomValue {
+    color: #737B8B;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+QWidget#EmptyCanvasArea {
+    background: #D7DCE5;
+    border-radius: 15px;
+}
+
+QFrame#EmptyCanvasCard {
+    background: rgba(255, 255, 255, 215);
+    border: 1px solid rgba(255, 255, 255, 240);
+    border-radius: 18px;
+}
+
+QLabel#EmptyCanvasIcon {
+    color: #FFFFFF;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #7889EF, stop:1 #B09BF4);
+    border-radius: 14px;
+    font-size: 20px;
+}
+
+QLabel#EmptyCanvasLabel {
+    color: #303541;
+    background: transparent;
+    border: none;
+    padding: 0;
+    min-height: 0;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+QLabel#EmptyCanvasLabel[error="true"] {
+    color: #B42318;
+    background: transparent;
+}
+
+QLabel#EmptyCanvasHint {
+    color: #969DAA;
+    background: transparent;
+    font-size: 11px;
+}
+
+/* --- 图片队列 --- */
+QLabel#RailTitle {
+    color: #303541;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+QLabel#RailCount, QLabel#RailNote {
+    color: #969DAA;
+    background: transparent;
+    font-size: 10px;
+}
+
+QPushButton#RailAddTile {
+    color: #8E96A6;
+    background: rgba(255, 255, 255, 90);
+    border: 1px dashed #C3C9D6;
+    border-radius: 10px;
+    font-size: 16px;
+    padding: 0;
+}
+
+QPushButton#RailAddTile:hover {
+    color: #4D5BC0;
+    border-color: #8792E9;
+    background: #FFFFFF;
+}
+
+QFrame#ImageRail QPushButton#removePhotosButton {
+    color: #8E96A6;
+    background: rgba(255, 255, 255, 90);
+    border: 1px solid #E1E5EE;
+    border-radius: 10px;
+    font-size: 14px;
+    padding: 0;
+}
+
+QFrame#ImageRail QPushButton#removePhotosButton:hover {
+    color: #4D5BC0;
+    border-color: #8792E9;
+    background: #FFFFFF;
+}
+
+QFrame#ImageRail QListWidget#railList::item {
+    font-size: 9px;
+    padding: 2px;
+}
+
+/* --- 顶栏保存状态 --- */
+QLabel#SavedState[state="saving"] {
+    color: #C29A3C;
+}
+
+QLabel#SavedState[state="error"] {
+    color: #C2473C;
+}
+
+/* --- 模板对话框 --- */
+QDialog#TemplateDialog {
+    background: #F3F5FA;
+}
+
+QFrame#TemplateDialogCard {
+    background: #FFFFFF;
+    border: none;
+}
+
+QLabel#DialogTitle {
+    color: #262A35;
+    background: transparent;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+QLabel#DialogHint {
+    color: #8D94A3;
+    background: transparent;
+    font-size: 11px;
+}
+
+QLabel#DialogError {
+    color: #C2473C;
+    background: transparent;
+    font-size: 10px;
 }

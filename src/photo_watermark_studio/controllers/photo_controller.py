@@ -24,6 +24,7 @@ from photo_watermark_studio.core.settings_store import (
 from photo_watermark_studio.core import settings_store
 from photo_watermark_studio.widgets.preview_widget import PLACEHOLDER_TEXT
 from photo_watermark_studio.workers.export_worker import CancelToken, ExportRunnable, ExportSignals
+from photo_watermark_studio.workers.folder_scan import FolderScanRunnable, FolderScanSignals
 from photo_watermark_studio.workers.preview_worker import (
     PreviewRunnable,
     PreviewSignals,
@@ -48,6 +49,7 @@ class PhotoController(QObject):
     photoStatusesChanged = Signal(object)
     historyChanged = Signal(bool, bool)
     summaryChanged = Signal(object)
+    saveStateChanged = Signal(str)  # saving / saved / error
 
     def __init__(
         self,
@@ -114,6 +116,9 @@ class PhotoController(QObject):
         self._source_pool.setMaxThreadCount(1)
         self._export_pool = QThreadPool(self)
         self._export_pool.setMaxThreadCount(1)
+        self._scan_pool = QThreadPool(self)
+        self._scan_pool.setMaxThreadCount(1)
+        self._folder_scan_id = 0
 
     def render_options(self, photo_path: str | None = None) -> dict[str, Any]:
         base = self.document.render_options()
@@ -149,11 +154,18 @@ class PhotoController(QObject):
         data["conflict_policy"] = self.conflict_policy
         return data
 
+    def _schedule_save(self) -> None:
+        self._save_timer.start()
+        self.saveStateChanged.emit("saving")
+
     def save_settings(self) -> None:
         try:
             settings_store.save_settings(self.snapshot(), self._settings_path)
         except OSError as exc:
             self.statusChanged.emit(f"设置未能保存：{exc}")
+            self.saveStateChanged.emit("error")
+            return
+        self.saveStateChanged.emit("saved")
 
     def set_browse_dir(self, path: str) -> None:
         candidate = Path(path)
@@ -161,7 +173,7 @@ class PhotoController(QObject):
         if not folder or folder == self.browse_dir:
             return
         self.browse_dir = folder
-        self._save_timer.start()
+        self._schedule_save()
 
     def apply_settings(self, state: dict[str, Any], *, record_history: bool = True) -> None:
         normalized = coerce_settings(state)
@@ -198,7 +210,7 @@ class PhotoController(QObject):
         if changed:
             self.schedule_preview()
         self._emit_summary()
-        self._save_timer.start()
+        self._schedule_save()
 
     def apply_layout_offset(self, ox: float, oy: float) -> None:
         """兼容旧接口；整框偏移已废弃，改用 field_positions。"""
@@ -229,7 +241,7 @@ class PhotoController(QObject):
         self._history.push(self.document.settings_payload())
         self._emit_history()
         # 双图层下精灵已跟手，松手只持久化坐标，不必整图重渲。
-        self._save_timer.start()
+        self._schedule_save()
 
     def apply_edit_session_field(
         self,
@@ -238,6 +250,7 @@ class PhotoController(QObject):
         scale: float | None = None,
         font: str | None = None,
         bold: bool | None = None,
+        italic: bool | None = None,
         opacity: float | None = None,
     ) -> None:
         if not self.current_path:
@@ -249,6 +262,7 @@ class PhotoController(QObject):
             scale,
             font=font,
             bold=bold,
+            italic=italic,
             opacity=opacity,
         )
         self._mark_edited(self.current_path)
@@ -261,6 +275,7 @@ class PhotoController(QObject):
         *,
         font: str | None = None,
         bold: bool | None = None,
+        italic: bool | None = None,
         opacity: float | None = None,
     ) -> None:
         if not self.current_path:
@@ -273,6 +288,7 @@ class PhotoController(QObject):
             float(current.get("scale", 1.0)),
             font=font if font is not None else str(current.get("font", "默认")),
             bold=bool(current.get("bold", False)) if bold is None else bool(bold),
+            italic=bool(current.get("italic", False)) if italic is None else bool(italic),
             opacity=(
                 float(current.get("opacity", 1.0))
                 if opacity is None
@@ -289,6 +305,9 @@ class PhotoController(QObject):
     def apply_edit_session_bold(self, field: str, bold: bool) -> None:
         self._apply_session_style(field, bold=bold)
 
+    def apply_edit_session_italic(self, field: str, italic: bool) -> None:
+        self._apply_session_style(field, italic=italic)
+
     def apply_edit_session_opacity(self, field: str, opacity: float) -> None:
         self._apply_session_style(field, opacity=opacity)
 
@@ -300,6 +319,8 @@ class PhotoController(QObject):
         if self.photo_status.get(target) == "edited":
             self.photo_status[target] = "pending"
             self._emit_statuses()
+        if target == self.current_path:
+            self.editSessionCleared.emit()
         self.schedule_preview()
         self._emit_summary()
 
@@ -388,12 +409,24 @@ class PhotoController(QObject):
         if not root.is_dir():
             self.notice.emit("warn", "提示", "所选文件夹不存在。")
             return
-        paths = [
-            str(item)
-            for item in root.rglob("*")
-            if item.is_file() and item.suffix.lower() in SUPPORTED_EXTS
-        ]
-        self.add_paths(sorted(paths))
+        self._folder_scan_id += 1
+        request_id = self._folder_scan_id
+        self.statusChanged.emit("正在扫描文件夹…")
+        signals = FolderScanSignals(self)
+        signals.finished.connect(self._on_folder_scanned)
+        self._scan_pool.start(FolderScanRunnable(request_id, str(root), signals))
+
+    def _on_folder_scanned(self, request_id: int, paths: object) -> None:
+        sender = self.sender()
+        if sender is not None:
+            sender.deleteLater()
+        if self._closing or request_id != self._folder_scan_id:
+            return
+        items = [str(path) for path in paths] if isinstance(paths, list) else []
+        if not items:
+            self.statusChanged.emit("这个文件夹里没有支持的照片。支持 JPG、PNG、WEBP、TIFF、BMP。")
+            return
+        self.add_paths(items)
 
     def remove_paths(self, paths: list[str]) -> None:
         if not paths:
@@ -556,6 +589,7 @@ class PhotoController(QObject):
         self._closing = True
         self._request_id += 1
         self._source_request_id += 1
+        self._folder_scan_id += 1
         self._preview_timer.stop()
         self._save_timer.stop()
         self.save_settings()
@@ -564,6 +598,7 @@ class PhotoController(QObject):
         self._preview_pool.waitForDone()
         self._source_pool.waitForDone()
         self._export_pool.waitForDone()
+        self._scan_pool.waitForDone()
         QCoreApplication.processEvents()
 
     def _on_preview_timeout(self) -> None:

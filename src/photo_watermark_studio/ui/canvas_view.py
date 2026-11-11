@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import QPoint, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -221,6 +221,56 @@ class _ZoomView(QGraphicsView):
         self.viewportResized.emit()
 
 
+class _FieldEditor(QFrame):
+    """不占画布布局的字段修改小窗。Esc 关闭。"""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("FieldEditorBar")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._on_hidden: Any = None
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        callback = self._on_hidden
+        if callback is not None:
+            callback()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class _CanvasToolsBar(QFrame):
+    """画布底部缩放条。不用遮罩，直接抗锯齿画胶囊，避免圆角被切成锯齿。"""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("CanvasToolsBar")
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # 笔画在矩形内侧，避免圆弧被控件边缘裁掉。
+        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+        if rect.width() < 2 or rect.height() < 2:
+            return
+        radius = rect.height() / 2.0
+        painter.setPen(QPen(QColor("#8E99AB"), 1.0))
+        painter.setBrush(QBrush(QColor("#FFFFFF")))
+        painter.drawRoundedRect(rect, radius, radius)
+
+
 class CanvasPanel(QFrame):
     """替代旧 PreviewPanel 的画布容器，保留兼容信号。"""
 
@@ -229,60 +279,56 @@ class CanvasPanel(QFrame):
     fieldChanged = Signal(str, str, object)
     fontFamilyChanged = Signal(str, str)  # field_key, font_family
     fontBoldChanged = Signal(str, bool)  # field_key, bold
+    fontItalicChanged = Signal(str, bool)  # field_key, italic
     fontOpacityChanged = Signal(str, float)  # field_key, opacity 0.3–1.0
     layoutOffsetChanged = Signal(float, float)  # 兼容旧接线；自定义不再使用
     fieldPositionChanged = Signal(str, float, float)
     compareToggled = Signal(bool)
+    importRequested = Signal()
+
+    @staticmethod
+    def _tool_button(text: str, object_name: str, tip: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName(object_name)
+        button.setProperty("canvasTool", True)
+        button.setToolTip(tip)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        return button
 
     def __init__(self) -> None:
         super().__init__()
-        self.setObjectName("Panel")
+        self.setObjectName("CanvasShell")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(0)
 
-        title_row = QHBoxLayout()
-        title = QLabel("画布 / 实时预览")
-        title.setObjectName("PanelTitle")
-        title_row.addWidget(title)
-        title_row.addStretch(1)
-        root.addLayout(title_row)
-
-        self.tools_bar = QWidget()
-        self.tools_bar.setObjectName("CanvasToolsBar")
+        self.tools_bar = _CanvasToolsBar(self)
         tools = QHBoxLayout(self.tools_bar)
-        tools.setContentsMargins(0, 0, 0, 0)
-        tools.setSpacing(6)
-        self.fit_button = QPushButton("适应窗口")
-        self.fit_button.setObjectName("fitViewButton")
-        self.fit_button.setProperty("role", "soft")
-        self.one_button = QPushButton("100%")
-        self.one_button.setObjectName("oneToOneButton")
-        self.one_button.setProperty("role", "soft")
-        self.zoom_out_button = QPushButton("缩小")
-        self.zoom_out_button.setProperty("role", "soft")
-        self.zoom_in_button = QPushButton("放大")
-        self.zoom_in_button.setProperty("role", "soft")
-        self.scale_label = QLabel("适应")
-        self.scale_label.setObjectName("ValueLabel")
-        self.compare_button = QPushButton("原图对比")
-        self.compare_button.setObjectName("compareButton")
+        tools.setContentsMargins(12, 5, 12, 5)
+        tools.setSpacing(4)
+        self.zoom_out_button = self._tool_button("−", "zoomOutButton", "缩小")
+        zoom_caption = QLabel("缩放")
+        zoom_caption.setObjectName("CanvasZoomCaption")
+        self.scale_label = QLabel("100%")
+        self.scale_label.setObjectName("CanvasZoomValue")
+        self.scale_label.setMinimumWidth(38)
+        self.scale_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_in_button = self._tool_button("＋", "zoomInButton", "放大")
+        self.fit_button = self._tool_button("⛶ 适应", "fitViewButton", "适应窗口")
+        self.one_button = self._tool_button("⌗ 原图比例", "oneToOneButton", "按 1:1 像素查看")
+        self.compare_button = self._tool_button("◐ 原图对比", "compareButton", "切换查看原图")
         self.compare_button.setCheckable(True)
-        self.compare_button.setProperty("role", "soft")
-        for btn in (
-            self.fit_button,
-            self.one_button,
-            self.zoom_out_button,
-            self.zoom_in_button,
-            self.compare_button,
-        ):
-            tools.addWidget(btn)
+        tools.addWidget(self.zoom_out_button)
+        tools.addWidget(zoom_caption)
         tools.addWidget(self.scale_label)
-        tools.addStretch(1)
-        root.addWidget(self.tools_bar)
-
+        tools.addWidget(self.zoom_in_button)
+        for btn in (self.fit_button, self.one_button, self.compare_button):
+            dot = QLabel("·")
+            dot.setObjectName("CanvasToolDot")
+            tools.addWidget(dot)
+            tools.addWidget(btn)
         self.scene = QGraphicsScene(self)
         # 与浅色相框区分的中性灰底（导出不受影响）。
         self.scene.setBackgroundBrush(QBrush(QColor("#8B94A3")))
@@ -291,19 +337,56 @@ class CanvasPanel(QFrame):
         self.view.setObjectName("CanvasView")
         root.addWidget(self.view, 1)
 
+        self.empty_state = QWidget()
+        self.empty_state.setObjectName("EmptyCanvasArea")
+        self.empty_state.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.empty_state.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        empty_outer = QVBoxLayout(self.empty_state)
+        empty_outer.setContentsMargins(24, 24, 24, 24)
+        empty_outer.addStretch(1)
+        self.empty_card = QFrame()
+        self.empty_card.setObjectName("EmptyCanvasCard")
+        self.empty_card.setFixedWidth(320)
+        card_layout = QVBoxLayout(self.empty_card)
+        card_layout.setContentsMargins(28, 26, 28, 24)
+        card_layout.setSpacing(10)
+        empty_icon = QLabel("✦")
+        empty_icon.setObjectName("EmptyCanvasIcon")
+        empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_icon.setFixedSize(48, 48)
         self.empty_label = QLabel(PLACEHOLDER_TEXT)
         self.empty_label.setObjectName("EmptyCanvasLabel")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_label.setWordWrap(True)
-        self.empty_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        root.addWidget(self.empty_label, 1)
+        self.empty_hint = QLabel("支持 JPG / PNG / WEBP / TIFF，也可以直接拖入照片或文件夹")
+        self.empty_hint.setObjectName("EmptyCanvasHint")
+        self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_hint.setWordWrap(True)
+        self.import_button = QPushButton("＋ 导入照片")
+        self.import_button.setObjectName("emptyImportButton")
+        self.import_button.setProperty("role", "primary")
+        self.import_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.import_button.clicked.connect(self.importRequested)
+        card_layout.addWidget(empty_icon, 0, Qt.AlignmentFlag.AlignHCenter)
+        card_layout.addWidget(self.empty_label)
+        card_layout.addWidget(self.empty_hint)
+        card_layout.addSpacing(4)
+        card_layout.addWidget(self.import_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        empty_outer.addWidget(self.empty_card, 0, Qt.AlignmentFlag.AlignHCenter)
+        empty_outer.addStretch(1)
+        root.addWidget(self.empty_state, 1)
 
-        self.editor = QFrame()
-        self.editor.setObjectName("FieldEditorBar")
+        self.editor = _FieldEditor(self)
+        self.editor._on_hidden = self._clear_editor_key
         self.editor.setVisible(False)
-        er = QHBoxLayout(self.editor)
-        er.setContentsMargins(10, 8, 10, 8)
+        self.editor.setFixedWidth(500)
+        er = QVBoxLayout(self.editor)
+        er.setContentsMargins(12, 10, 12, 10)
         er.setSpacing(8)
+        row_text = QHBoxLayout()
+        row_text.setSpacing(8)
+        row_tools = QHBoxLayout()
+        row_tools.setSpacing(8)
         self.editor_label = QLabel("字段")
         self.editor_label.setObjectName("MutedLabel")
         self.editor_text = QLineEdit()
@@ -311,7 +394,9 @@ class CanvasPanel(QFrame):
         self.editor_font = QComboBox()
         self.editor_font.setObjectName("watermarkFontCombo")
         self.editor_font.setFixedWidth(148)
+        self.editor_font.setMaxVisibleItems(16)
         self.editor_font.setToolTip("水印字体")
+        self.editor_font.view().setMinimumWidth(220)
         for name in available_font_names():
             self.editor_font.addItem(name)
             family = qt_family_for(name)
@@ -330,6 +415,15 @@ class CanvasPanel(QFrame):
         bold_font = QFont(self.editor_bold.font())
         bold_font.setBold(True)
         self.editor_bold.setFont(bold_font)
+        self.editor_italic = QToolButton()
+        self.editor_italic.setObjectName("watermarkItalicButton")
+        self.editor_italic.setText("I")
+        self.editor_italic.setCheckable(True)
+        self.editor_italic.setToolTip("倾斜")
+        self.editor_italic.setFixedSize(32, 32)
+        italic_font = QFont(self.editor_italic.font())
+        italic_font.setItalic(True)
+        self.editor_italic.setFont(italic_font)
         self.editor_opacity_label = QLabel("透明")
         self.editor_opacity_label.setObjectName("MutedLabel")
         self.editor_opacity = QSpinBox()
@@ -351,21 +445,19 @@ class CanvasPanel(QFrame):
         self.editor_scale.setToolTip("字段大小")
         self.editor_close = QPushButton("完成")
         self.editor_close.setProperty("role", "soft")
-        er.addWidget(self.editor_label)
-        er.addWidget(self.editor_text, 1)
-        er.addWidget(self.editor_font)
-        er.addWidget(self.editor_bold)
-        er.addWidget(self.editor_opacity_label)
-        er.addWidget(self.editor_opacity)
-        er.addWidget(self.editor_scale_label)
-        er.addWidget(self.editor_scale)
-        er.addWidget(self.editor_close)
-        self.tip = QLabel("修改写入当前照片覆盖；可撤销。右键拖动画布；预览为高分辨率，可放大查看细节。")
-        self.tip.setObjectName("MutedLabel")
-        self.tip.setWordWrap(True)
-        self._tip_default = self.tip.text()
-        root.addWidget(self.editor)
-        root.addWidget(self.tip)
+        row_text.addWidget(self.editor_label)
+        row_text.addWidget(self.editor_text, 1)
+        row_tools.addWidget(self.editor_font)
+        row_tools.addWidget(self.editor_bold)
+        row_tools.addWidget(self.editor_italic)
+        row_tools.addWidget(self.editor_opacity_label)
+        row_tools.addWidget(self.editor_opacity)
+        row_tools.addWidget(self.editor_scale_label)
+        row_tools.addWidget(self.editor_scale)
+        row_tools.addStretch(1)
+        row_tools.addWidget(self.editor_close)
+        er.addLayout(row_text)
+        er.addLayout(row_tools)
 
         self._photo_item = QGraphicsPixmapItem()
         self._photo_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
@@ -404,6 +496,7 @@ class CanvasPanel(QFrame):
         self.editor_text.textEdited.connect(self._emit_editor)
         self.editor_font.currentTextChanged.connect(self._emit_font_family)
         self.editor_bold.toggled.connect(self._emit_font_bold)
+        self.editor_italic.toggled.connect(self._emit_font_italic)
         self.editor_opacity.valueChanged.connect(self._emit_font_opacity)
         self.editor_scale.valueChanged.connect(self._emit_editor)
         self.editor_close.clicked.connect(self.hide_field_editor)
@@ -416,11 +509,11 @@ class CanvasPanel(QFrame):
 
     def show_message(self, text: str, is_error: bool = False) -> None:
         self.empty_label.setText(text)
-        self.empty_label.setVisible(True)
+        self.empty_state.setVisible(True)
+        self.empty_hint.setVisible(not is_error)
         self.view.setVisible(False)
         self.tools_bar.setVisible(False)
-        self.tip.setVisible(False)
-        self.editor.setVisible(False)
+        self.editor.hide()
         self._photo_item.setPixmap(QPixmap())
         self._bar_item.setVisible(False)
         self._guide_item.setVisible(False)
@@ -441,18 +534,27 @@ class CanvasPanel(QFrame):
     def set_layout_drag_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled)
         if enabled == self._allow_field_drag:
-            self._update_tip()
             return
         self._allow_field_drag = enabled
-        self._update_tip()
         if self._has_image and not self._compare and not self._field_dragging:
             self._rebuild_overlays(True)
 
-    def _update_tip(self) -> None:
-        if self._allow_field_drag:
-            self.tip.setText("自定义模式：左键拖动字段，松手吸附网格；右键拖动画布。")
-        else:
-            self.tip.setText(self._tip_default)
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._place_tools_bar()
+
+    def _place_tools_bar(self) -> None:
+        if not self.tools_bar.isVisible():
+            return
+        self.tools_bar.adjustSize()
+        hint = self.tools_bar.sizeHint()
+        width = max(hint.width(), self.tools_bar.width())
+        height = max(32, hint.height())
+        host = self.view.geometry() if self.view.isVisible() else self.rect()
+        x = host.x() + max(8, (host.width() - width) // 2)
+        y = host.y() + host.height() - height - 6
+        self.tools_bar.setGeometry(x, y, width, height)
+        self.tools_bar.raise_()
 
     def set_photo_token(self, token: str) -> None:
         """换图时传入路径，用于决定是否重置适应窗口。"""
@@ -484,10 +586,10 @@ class CanvasPanel(QFrame):
         self._watermark_image = QImage(image)
         self._hits = list(hits or [])
         self._sprites = list(sprites or [])
-        self.empty_label.setVisible(False)
-        self.tools_bar.setVisible(True)
-        self.tip.setVisible(True)
+        self.empty_state.setVisible(False)
         self.view.setVisible(True)
+        self.tools_bar.setVisible(True)
+        self._place_tools_bar()
         self._apply_display_image()
         self._has_image = True
 
@@ -632,10 +734,10 @@ class CanvasPanel(QFrame):
             self.view.centerOn(self._photo_item)
 
     def _on_scale_label(self, scale: float) -> None:
-        if self._fit_mode:
-            self.scale_label.setText("适应")
-        else:
-            self.scale_label.setText(f"{int(round(scale * 100))}%")
+        self.scale_label.setText(f"{int(round(scale * 100))}%")
+        self.fit_button.setProperty("active", self._fit_mode)
+        self.fit_button.style().unpolish(self.fit_button)
+        self.fit_button.style().polish(self.fit_button)
 
     def _on_viewport_resized(self) -> None:
         if self._fit_mode and self._has_image:
@@ -650,11 +752,12 @@ class CanvasPanel(QFrame):
         self._on_scale_label(self.view.current_scale())
 
     def open_field_editor(self, payload: dict[str, Any]) -> None:
-        self._editor_key = str(payload.get("key", ""))
-        self.editor_label.setText(str(payload.get("label", self._editor_key)))
+        key = str(payload.get("key", ""))
+        self.editor_label.setText(str(payload.get("label", key)))
         self.editor_text.blockSignals(True)
         self.editor_font.blockSignals(True)
         self.editor_bold.blockSignals(True)
+        self.editor_italic.blockSignals(True)
         self.editor_opacity.blockSignals(True)
         self.editor_scale.blockSignals(True)
         self.editor_text.setText(str(payload.get("text", "")))
@@ -662,8 +765,9 @@ class CanvasPanel(QFrame):
         font_family = coerce_font_family(payload.get("font_family", DEFAULT_FONT_FAMILY))
         idx = self.editor_font.findText(font_family)
         self.editor_font.setCurrentIndex(idx if idx >= 0 else 0)
-        default_bold = bool(DEFAULT_FIELD_BOLD.get(self._editor_key, False))
+        default_bold = bool(DEFAULT_FIELD_BOLD.get(key, False))
         self.editor_bold.setChecked(bool(payload.get("font_bold", default_bold)))
+        self.editor_italic.setChecked(bool(payload.get("font_italic", False)))
         opacity = coerce_field_opacity(payload.get("font_opacity", 1.0), 1.0)
         self.editor_opacity.setValue(int(round(opacity * 100)))
         has_scale = bool(payload.get("has_scale", False))
@@ -675,13 +779,42 @@ class CanvasPanel(QFrame):
         self.editor_text.blockSignals(False)
         self.editor_font.blockSignals(False)
         self.editor_bold.blockSignals(False)
+        self.editor_italic.blockSignals(False)
         self.editor_opacity.blockSignals(False)
         self.editor_scale.blockSignals(False)
-        self.editor.setVisible(True)
+        self.editor.show()
+        self.editor.raise_()
+        self._place_editor()
+        self._editor_key = key
+        self.editor.activateWindow()
         self.editor_text.setFocus()
 
+    def _place_editor(self) -> None:
+        origin = self.mapToGlobal(QPoint(0, 0))
+        bounds = QRect(origin, self.size())
+        self.editor.setFixedWidth(min(500, max(280, bounds.width() - 16)))
+        self.editor.adjustSize()
+        size = self.editor.size()
+        if size.isEmpty():
+            size = self.editor.sizeHint()
+        origin = self.mapToGlobal(QPoint(0, 0))
+        bounds = QRect(origin, self.size())
+        cursor = QCursor.pos()
+        x = cursor.x() + 12
+        y = cursor.y() + 16
+        if x + size.width() > bounds.right() - 8:
+            x = bounds.right() - size.width() - 8
+        if y + size.height() > bounds.bottom() - 8:
+            y = cursor.y() - size.height() - 12
+        x = max(bounds.left() + 8, min(x, bounds.right() - size.width() - 8))
+        y = max(bounds.top() + 8, min(y, max(bounds.top() + 8, bounds.bottom() - size.height() - 8)))
+        self.editor.move(x, y)
+
     def hide_field_editor(self) -> None:
-        self.editor.setVisible(False)
+        self.editor.hide()
+        self._clear_editor_key()
+
+    def _clear_editor_key(self) -> None:
         self._editor_key = ""
 
     def _emit_editor(self, *_args: object) -> None:
@@ -702,6 +835,11 @@ class CanvasPanel(QFrame):
         if not self._editor_key:
             return
         self.fontBoldChanged.emit(self._editor_key, bool(checked))
+
+    def _emit_font_italic(self, checked: bool) -> None:
+        if not self._editor_key:
+            return
+        self.fontItalicChanged.emit(self._editor_key, bool(checked))
 
     def _emit_font_opacity(self, *_args: object) -> None:
         if not self._editor_key:

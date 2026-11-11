@@ -16,7 +16,12 @@ from PIL import Image, ImageCms
 from PIL.ExifTags import Base as ExifBase
 
 from photo_watermark_studio.core.export_service import allocate_output_path, export_image
-from photo_watermark_studio.core.settings_store import coerce_settings, load_settings, save_settings
+from photo_watermark_studio.core.settings_store import (
+    coerce_settings,
+    load_settings,
+    reset_watermark_settings,
+    save_settings,
+)
 
 OPTIONS = {
     "style": "经典底栏",
@@ -219,6 +224,25 @@ class ExportImageTests(_TempCase):
         with Image.open(dropped_path) as image:
             self.assertFalse(bool(image.info.get("icc_profile")))
 
+    def test_export_applies_orientation_and_marks_it_upright(self) -> None:
+        root = self.root / "orient"
+        output_dir = root / "out"
+        output_dir.mkdir(parents=True)
+        source = root / "side.jpg"
+        image = Image.new("RGB", (30, 12), (255, 0, 0))
+        image.paste((0, 0, 255), (0, 0, 8, 12))
+        exif = Image.Exif()
+        exif[274] = 6
+        exif[271] = "TestCam"
+        image.save(source, "JPEG", quality=95, exif=exif.tobytes())
+        saved = Path(export_image(source, output_dir, OPTIONS, 90))
+        with Image.open(saved) as out:
+            self.assertEqual(out.size[0], 12)
+            self.assertGreater(out.size[1], 30)
+            saved_exif = out.getexif()
+            self.assertEqual(int(saved_exif.get(274) or 0), 1)
+            self.assertEqual(str(saved_exif.get(271) or ""), "TestCam")
+
     def test_bad_icc_bytes_still_export(self) -> None:
         root = self.root / "bad-icc"
         output_dir = root / "out"
@@ -236,6 +260,60 @@ class ExportImageTests(_TempCase):
 
 
 class SettingsStoreTests(_TempCase):
+    def test_reset_watermark_keeps_export_and_restores_design(self) -> None:
+        current = {
+            "output_dir": "D:/Photos/Out",
+            "browse_dir": "D:/Photos/In",
+            "style": "卡片相框",
+            "base_style": "极简叠加",
+            "theme": "深色",
+            "brand": "Ada",
+            "caption": "城市",
+            "scale": 1.4,
+            "logo_path": "D:/logo.png",
+            "show_camera": False,
+            "show_date": True,
+            "quality": 80,
+            "export_format": "png",
+            "png_compress": 2,
+            "webp_quality": 70,
+            "keep_exif": False,
+            "keep_icc": False,
+            "conflict_policy": "overwrite",
+            "layout": {
+                "bar_height": 1.8,
+                "side_pad": 1.6,
+                "pad_top": 1.4,
+                "pad_bottom": 0.6,
+                "bar_opacity": 0.4,
+                "field_positions": {"brand": {"x": 0.2, "y": 0.3}},
+            },
+        }
+        reset = reset_watermark_settings(current)
+        self.assertEqual(reset["output_dir"], "D:/Photos/Out")
+        self.assertEqual(reset["browse_dir"], "D:/Photos/In")
+        self.assertEqual(reset["quality"], 80)
+        self.assertEqual(reset["export_format"], "png")
+        self.assertEqual(reset["png_compress"], 2)
+        self.assertEqual(reset["webp_quality"], 70)
+        self.assertFalse(reset["keep_exif"])
+        self.assertFalse(reset["keep_icc"])
+        self.assertEqual(reset["conflict_policy"], "overwrite")
+        self.assertEqual(reset["style"], "经典底栏")
+        self.assertEqual(reset["theme"], "白色")
+        self.assertEqual(reset["brand"], "")
+        self.assertEqual(reset["caption"], "")
+        self.assertEqual(reset["logo_path"], "")
+        self.assertAlmostEqual(reset["scale"], 1.0)
+        self.assertTrue(reset["show_camera"])
+        self.assertFalse(reset["show_date"])
+        self.assertAlmostEqual(reset["layout"]["bar_height"], 1.0)
+        self.assertAlmostEqual(reset["layout"]["side_pad"], 1.0)
+        self.assertAlmostEqual(reset["layout"]["pad_top"], 1.0)
+        self.assertAlmostEqual(reset["layout"]["pad_bottom"], 1.0)
+        self.assertAlmostEqual(reset["layout"]["bar_opacity"], 0.72)
+        self.assertEqual(reset["layout"]["field_positions"], {})
+
     def test_round_trip_and_invalid_values(self) -> None:
         path = self.root / "settings.json"
         save_settings(
@@ -255,7 +333,7 @@ class SettingsStoreTests(_TempCase):
         )
         loaded = load_settings(path)
         self.assertEqual(loaded["style"], "经典底栏")
-        self.assertEqual(loaded["theme"], "深色")
+        self.assertEqual(loaded["theme"], "黑色")
         self.assertEqual(loaded["scale"], 1.6)
         self.assertEqual(loaded["quality"], 80)
         self.assertEqual(loaded["brand"], "Ada")

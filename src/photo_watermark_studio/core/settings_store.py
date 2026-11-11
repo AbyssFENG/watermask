@@ -10,9 +10,17 @@ from typing import Any
 
 from photo_watermark_studio.core.font_presets import coerce_font_family
 
-BUILTIN_STYLES = ("经典底栏", "极简叠加", "卡片相框", "纯文字中下")
+BUILTIN_STYLES = ("经典底栏", "极简叠加", "卡片相框", "纯文字中下", "胶片边框")
+LOGO_MARKS = ("", "nikon")
+BG_SWATCHES = ("#FFFFFF", "#22252B", "#E9E5DC", "#CBD6DF", "#D5C0E6")
 STYLES = (*BUILTIN_STYLES, "自定义")
-THEMES = ("浅色", "深色", "蓝色", "高斯模糊")
+THEMES = ("白色", "黑色", "高斯模糊")
+_LEGACY_THEMES = {
+    "浅色": "白色",
+    "深色": "黑色",
+    "蓝色": "白色",
+    "高斯模糊+变暗": "高斯模糊",
+}
 
 TEXT_KEYS = (
     "camera_text",
@@ -46,6 +54,15 @@ FIELD_BOLD_KEYS = (
     "brand_bold",
     "caption_bold",
 )
+FIELD_ITALIC_KEYS = (
+    "camera_italic",
+    "lens_italic",
+    "exif_italic",
+    "date_italic",
+    "gps_italic",
+    "brand_italic",
+    "caption_italic",
+)
 FIELD_OPACITY_KEYS = (
     "camera_opacity",
     "lens_opacity",
@@ -70,11 +87,16 @@ OPTION_KEYS = (
     "style",
     "base_style",
     "theme",
+    "bg_color",
     "brand",
     "caption",
     "scale",
     "logo_path",
+    "logo_mark",
+    "logo_scale",
+    "logo_opacity",
     "show_logo",
+    "show_divider",
     "show_camera",
     "show_lens",
     "show_exif",
@@ -85,6 +107,7 @@ OPTION_KEYS = (
     *FIELD_SCALE_KEYS,
     *FIELD_FONT_KEYS,
     *FIELD_BOLD_KEYS,
+    *FIELD_ITALIC_KEYS,
     *FIELD_OPACITY_KEYS,
 )
 
@@ -126,7 +149,14 @@ def default_layout() -> dict[str, Any]:
         "offset_y": 0.0,
         "bar_opacity": 0.72,
         "corner_radius": 0,
+        "shadow_strength": 25,
         "blur_radius": 12.0,
+        "bar_height": 1.0,
+        "side_pad": 1.0,
+        "pad_left": 1.0,
+        "pad_right": 1.0,
+        "pad_top": 1.0,
+        "pad_bottom": 1.0,
         "field_positions": {},
     }
 
@@ -137,12 +167,17 @@ def default_settings() -> dict[str, Any]:
         "browse_dir": str(Path.home()),
         "style": "经典底栏",
         "base_style": "经典底栏",
-        "theme": "浅色",
+        "theme": "白色",
+        "bg_color": "",
         "brand": "",
         "caption": "",
         "scale": 1.0,
         "logo_path": "",
+        "logo_mark": "",
+        "logo_scale": 1.0,
+        "logo_opacity": 1.0,
         "show_logo": True,
+        "show_divider": False,
         "show_camera": True,
         "show_lens": True,
         "show_exif": True,
@@ -173,6 +208,13 @@ def default_settings() -> dict[str, Any]:
         "gps_bold": False,
         "brand_bold": True,
         "caption_bold": False,
+        "camera_italic": False,
+        "lens_italic": False,
+        "exif_italic": False,
+        "date_italic": False,
+        "gps_italic": False,
+        "brand_italic": False,
+        "caption_italic": False,
         "camera_opacity": 1.0,
         "lens_opacity": 1.0,
         "exif_opacity": 1.0,
@@ -189,6 +231,29 @@ def default_settings() -> dict[str, Any]:
         "layout": default_layout(),
         "conflict_policy": "number",
     }
+
+
+_EXPORT_KEEP_KEYS = (
+    "output_dir",
+    "browse_dir",
+    "quality",
+    "export_format",
+    "png_compress",
+    "webp_quality",
+    "keep_exif",
+    "keep_icc",
+    "conflict_policy",
+)
+
+
+def reset_watermark_settings(current: dict[str, Any] | None) -> dict[str, Any]:
+    """恢复水印设计为默认值，保留导出目录和导出选项。"""
+    merged = default_settings()
+    source = current if isinstance(current, dict) else {}
+    for key in _EXPORT_KEEP_KEYS:
+        if key in source:
+            merged[key] = source[key]
+    return coerce_settings(merged)
 
 
 def default_settings_path() -> Path:
@@ -214,6 +279,18 @@ def coerce_field_opacity(raw: Any, default: float = 1.0) -> float:
     return min(_FIELD_OPACITY_MAX, max(_FIELD_OPACITY_MIN, value))
 
 
+def coerce_hex_color(raw: Any) -> str:
+    """只接受 #RRGGBB 或 #RGB，返回大写 #RRGGBB；其余返回空串。"""
+    text = str(raw or "").strip().upper()
+    if text.startswith("#"):
+        body = text[1:]
+        if len(body) == 3 and all(ch in "0123456789ABCDEF" for ch in body):
+            return "#" + "".join(ch * 2 for ch in body)
+        if len(body) == 6 and all(ch in "0123456789ABCDEF" for ch in body):
+            return "#" + body
+    return ""
+
+
 def coerce_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     base = default_settings()
     if not isinstance(raw, dict):
@@ -224,9 +301,9 @@ def coerce_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     base_style = str(raw.get("base_style", base["base_style"]) or "")
     data["base_style"] = base_style if base_style in BUILTIN_STYLES else base["base_style"]
     theme = str(raw.get("theme", base["theme"]) or "")
-    if theme == "高斯模糊+变暗":
-        theme = "高斯模糊"
+    theme = _LEGACY_THEMES.get(theme, theme)
     data["theme"] = theme if theme in THEMES else base["theme"]
+    data["bg_color"] = coerce_hex_color(raw.get("bg_color", ""))
     data["brand"] = str(raw.get("brand", "") or "")
     data["caption"] = str(raw.get("caption", "") or "")
     try:
@@ -235,7 +312,24 @@ def coerce_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
         scale = 1.0
     data["scale"] = min(1.6, max(0.65, scale))
     data["logo_path"] = str(raw.get("logo_path", "") or "")
-    for key in ("show_logo", "show_camera", "show_lens", "show_exif", "show_date", "show_gps", "show_brand_text"):
+    mark = str(raw.get("logo_mark", "") or "")
+    data["logo_mark"] = mark if mark in LOGO_MARKS else ""
+    for key, lo, hi in (("logo_scale", 0.5, 1.9), ("logo_opacity", 0.2, 1.0)):
+        try:
+            value = float(raw.get(key, base[key]))
+        except (TypeError, ValueError):
+            value = float(base[key])
+        data[key] = min(hi, max(lo, value))
+    for key in (
+        "show_logo",
+        "show_divider",
+        "show_camera",
+        "show_lens",
+        "show_exif",
+        "show_date",
+        "show_gps",
+        "show_brand_text",
+    ):
         data[key] = bool(raw.get(key, base[key]))
     for key in TEXT_KEYS:
         data[key] = str(raw.get(key, "") or "")
@@ -244,6 +338,8 @@ def coerce_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     for key in FIELD_FONT_KEYS:
         data[key] = coerce_font_family(raw.get(key, base[key]))
     for key in FIELD_BOLD_KEYS:
+        data[key] = bool(raw.get(key, base[key]))
+    for key in FIELD_ITALIC_KEYS:
         data[key] = bool(raw.get(key, base[key]))
     for key in FIELD_OPACITY_KEYS:
         data[key] = coerce_field_opacity(raw.get(key, base[key]), 1.0)
@@ -326,15 +422,29 @@ def coerce_layout(raw: dict[str, Any] | None) -> dict[str, Any]:
         ("offset_y", -0.45, 0.45),
         ("bar_opacity", 0.15, 1.0),
         ("blur_radius", 1.0, 40.0),
+        ("bar_height", 0.5, 2.0),
+        ("side_pad", 0.4, 2.2),
+        ("pad_top", 0.4, 2.2),
+        ("pad_bottom", 0.4, 2.2),
     ):
         try:
             data[key] = _clamp(float(raw.get(key, base[key])), lo, hi)
         except (TypeError, ValueError):
             data[key] = base[key]
+    # 旧配置只有 side_pad，左右边距沿用它。
+    for key in ("pad_left", "pad_right"):
+        try:
+            data[key] = _clamp(float(raw.get(key, data["side_pad"])), 0.4, 2.2)
+        except (TypeError, ValueError):
+            data[key] = data["side_pad"]
     try:
         data["corner_radius"] = int(_clamp(float(raw.get("corner_radius", 0)), 0, 48))
     except (TypeError, ValueError):
         data["corner_radius"] = 0
+    try:
+        data["shadow_strength"] = int(_clamp(float(raw.get("shadow_strength", 25)), 0, 100))
+    except (TypeError, ValueError):
+        data["shadow_strength"] = 25
     data["field_positions"] = coerce_field_positions(raw.get("field_positions"))
     return data
 

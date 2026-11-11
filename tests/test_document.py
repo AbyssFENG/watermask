@@ -33,6 +33,25 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(options["brand"], "Studio")
         self.assertIn("offset_x", options)
         self.assertEqual(options["anchor"], "bottom_center")
+        self.assertAlmostEqual(options["bar_height"], 1.0)
+        self.assertAlmostEqual(options["side_pad"], 1.0)
+
+    def test_bar_metrics_are_clamped(self) -> None:
+        layout = coerce_layout(
+            {
+                "bar_height": 9,
+                "side_pad": 0,
+                "pad_top": "bad",
+                "pad_bottom": 1.5,
+            }
+        )
+        self.assertAlmostEqual(layout["bar_height"], 2.0)
+        self.assertAlmostEqual(layout["side_pad"], 0.4)
+        self.assertAlmostEqual(layout["pad_top"], 1.0)
+        self.assertAlmostEqual(layout["pad_bottom"], 1.5)
+        options = WatermarkDocument({"layout": layout}).render_options()
+        self.assertAlmostEqual(options["bar_height"], 2.0)
+        self.assertAlmostEqual(options["pad_bottom"], 1.5)
 
     def test_layout_patch(self) -> None:
         doc = WatermarkDocument()

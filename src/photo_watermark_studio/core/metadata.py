@@ -151,51 +151,71 @@ def _file_fingerprint(path: Path) -> tuple[str, int, int] | None:
         return None
 
 
-def _parse_photo_metadata(path: Path) -> PhotoMetadata:
-    """Read common camera EXIF fields. Missing EXIF is normal and returns empty fields."""
+def metadata_from_image(im: Image.Image) -> PhotoMetadata:
+    """从已经打开的图片读取 EXIF。缺失字段保持为空。"""
     md = PhotoMetadata()
     try:
+        exif = im.getexif()
+        if not exif:
+            return md
+        md.make = _clean_exif_text(exif.get(271, ""))
+        model = _clean_exif_text(exif.get(272, ""))
+        md.camera = _format_camera(md.make, model)
+
+        try:
+            exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
+        except Exception:
+            exif_ifd = {}
+        exif_ifd = exif_ifd or {}
+
+        lens = exif_ifd.get(42036) or exif_ifd.get(0xA434) or exif.get(42036) or exif.get(0xA434)
+        if lens:
+            md.lens = _clean_exif_text(lens).upper()
+        md.focal = _format_focal(exif_ifd.get(37386) or exif.get(37386))
+        md.aperture = _format_aperture(exif_ifd.get(33437) or exif.get(33437))
+        md.shutter = _format_shutter(exif_ifd.get(33434) or exif.get(33434))
+        iso = exif_ifd.get(34855) or exif_ifd.get(0x8827) or exif.get(34855) or exif.get(0x8827)
+        if isinstance(iso, (tuple, list)):
+            iso = iso[0] if iso else None
+        if iso is not None:
+            md.iso = _clean_exif_text(iso)
+        date = exif_ifd.get(36867) or exif_ifd.get(36868) or exif.get(36867) or exif.get(306)
+        md.date = _format_datetime(date)
+
+        try:
+            gps_ifd = exif.get_ifd(ExifTags.IFD.GPSInfo)
+        except Exception:
+            gps_ifd = {}
+        if gps_ifd:
+            lat = _gps_to_decimal(gps_ifd.get(2), gps_ifd.get(1))
+            lon = _gps_to_decimal(gps_ifd.get(4), gps_ifd.get(3))
+            if lat is not None and lon is not None:
+                md.gps = f"{lat:.5f}, {lon:.5f}"
+    except Exception:
+        return PhotoMetadata()
+    return md
+
+
+def _parse_photo_metadata(path: Path) -> PhotoMetadata:
+    """Read common camera EXIF fields. Missing EXIF is normal and returns empty fields."""
+    try:
         with Image.open(path) as im:
-            exif = im.getexif()
-            if not exif:
-                return md
-            md.make = _clean_exif_text(exif.get(271, ""))
-            model = _clean_exif_text(exif.get(272, ""))
-            md.camera = _format_camera(md.make, model)
-
-            try:
-                exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
-            except Exception:
-                exif_ifd = {}
-            exif_ifd = exif_ifd or {}
-
-            lens = exif_ifd.get(42036) or exif_ifd.get(0xA434) or exif.get(42036) or exif.get(0xA434)
-            if lens:
-                md.lens = _clean_exif_text(lens).upper()
-            md.focal = _format_focal(exif_ifd.get(37386) or exif.get(37386))
-            md.aperture = _format_aperture(exif_ifd.get(33437) or exif.get(33437))
-            md.shutter = _format_shutter(exif_ifd.get(33434) or exif.get(33434))
-            iso = exif_ifd.get(34855) or exif_ifd.get(0x8827) or exif.get(34855) or exif.get(0x8827)
-            if isinstance(iso, (tuple, list)):
-                iso = iso[0] if iso else None
-            if iso is not None:
-                md.iso = _clean_exif_text(iso)
-            date = exif_ifd.get(36867) or exif_ifd.get(36868) or exif.get(36867) or exif.get(306)
-            md.date = _format_datetime(date)
-
-            try:
-                gps_ifd = exif.get_ifd(ExifTags.IFD.GPSInfo)
-            except Exception:
-                gps_ifd = {}
-            if gps_ifd:
-                lat = _gps_to_decimal(gps_ifd.get(2), gps_ifd.get(1))
-                lon = _gps_to_decimal(gps_ifd.get(4), gps_ifd.get(3))
-                if lat is not None and lon is not None:
-                    md.gps = f"{lat:.5f}, {lon:.5f}"
+            return metadata_from_image(im)
     except Exception:
         # Image may be damaged or an unsupported RAW format; the app still allows a custom caption.
-        return md
-    return md
+        return PhotoMetadata()
+
+
+def remember_photo_metadata(path: str | Path, md: PhotoMetadata) -> None:
+    """把已经读过的 EXIF 放进缓存，避免同一文件再打开一次。"""
+    p = Path(path)
+    fp = _file_fingerprint(p)
+    if fp is None:
+        return
+    key, mtime_ns, size = fp
+    _metadata_cache[key] = (mtime_ns, size, md)
+    while len(_metadata_cache) > _METADATA_CACHE_LIMIT:
+        _metadata_cache.pop(next(iter(_metadata_cache)))
 
 
 def read_photo_metadata(path: str | Path) -> PhotoMetadata:

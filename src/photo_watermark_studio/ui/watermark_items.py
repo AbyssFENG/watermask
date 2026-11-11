@@ -25,8 +25,7 @@ class WatermarkBarItem(QGraphicsObject):
         self.key = key
         self._rect = QRectF(0, 0, 100, 40)
         self._locked = True
-        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
-        self.setAcceptHoverEvents(True)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.setZValue(20)
         self._dragging = False
         self._base_offset = (0.0, 0.0)
@@ -54,13 +53,11 @@ class WatermarkBarItem(QGraphicsObject):
         self._base_offset = base_offset
 
     def boundingRect(self) -> QRectF:
-        return self._rect.adjusted(-4, -4, 4, 4)
+        return QRectF(self._rect)
 
     def paint(self, painter, option: QStyleOptionGraphicsItem, widget: QWidget | None = None) -> None:
-        pen = QPen(QColor(40, 91, 232, 50), 1.0)
-        painter.setPen(pen)
-        painter.setBrush(QBrush(QColor(40, 91, 232, 8)))
-        painter.drawRoundedRect(self._rect, 6, 6)
+        del painter, option, widget
+        return
 
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value: Any) -> Any:
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:

@@ -89,6 +89,13 @@ def list_templates(path: Path | None = None) -> list[dict[str, Any]]:
     return load_templates(path)
 
 
+def recent_templates(limit: int = 2, path: Path | None = None) -> list[dict[str, Any]]:
+    """按更新时间倒序返回最近的用户模板。"""
+    entries = load_templates(path)
+    entries.sort(key=lambda entry: str(entry.get("updated_at", "")), reverse=True)
+    return entries[: max(0, int(limit))]
+
+
 def get_template(template_id: str, path: Path | None = None) -> dict[str, Any] | None:
     tid = str(template_id or "").strip()
     if not tid:

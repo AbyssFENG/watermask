@@ -40,6 +40,7 @@ def empty_photo_overrides() -> dict[str, Any]:
         data[key] = DEFAULT_FONT_FAMILY
     for key in _EDITABLE_META:
         data[f"{key}_bold"] = bool(DEFAULT_FIELD_BOLD.get(key, False))
+        data[f"{key}_italic"] = False
         data[f"{key}_opacity"] = 1.0
     data["layout"] = {}
     return data
@@ -66,6 +67,7 @@ def _coerce_photo_overrides(raw: dict[str, Any] | None) -> dict[str, Any]:
             data[bold_key] = bool(raw.get(bold_key))
         else:
             data[bold_key] = default_bold
+        data[f"{key}_italic"] = bool(raw.get(f"{key}_italic", False))
         data[f"{key}_opacity"] = coerce_field_opacity(raw.get(f"{key}_opacity", 1.0), 1.0)
     if isinstance(raw.get("layout"), dict) and raw["layout"]:
         data["layout"] = coerce_layout(raw["layout"])
@@ -105,6 +107,7 @@ def merge_photo_overrides(
         merged[bold_key] = bool(
             values.get(bold_key, DEFAULT_FIELD_BOLD.get(key, False))
         )
+        merged[f"{key}_italic"] = bool(values.get(f"{key}_italic", False))
         merged[f"{key}_opacity"] = coerce_field_opacity(
             values.get(f"{key}_opacity", 1.0), 1.0
         )
@@ -121,7 +124,14 @@ def merge_photo_overrides(
             "offset_y",
             "bar_opacity",
             "corner_radius",
+            "shadow_strength",
             "blur_radius",
+            "bar_height",
+            "side_pad",
+            "pad_left",
+            "pad_right",
+            "pad_top",
+            "pad_bottom",
             "field_positions",
         ):
             if key in base_layout:
@@ -135,7 +145,14 @@ def merge_photo_overrides(
             "offset_y",
             "bar_opacity",
             "corner_radius",
+            "shadow_strength",
             "blur_radius",
+            "bar_height",
+            "side_pad",
+            "pad_left",
+            "pad_right",
+            "pad_top",
+            "pad_bottom",
             "field_positions",
         ):
             if key in merged["layout"]:
@@ -219,6 +236,8 @@ class EditSessionStore:
             default_bold = bool(DEFAULT_FIELD_BOLD.get(key, False))
             if bool(values.get(f"{key}_bold", default_bold)) != default_bold:
                 return True
+            if bool(values.get(f"{key}_italic", False)):
+                return True
             if abs(coerce_field_opacity(values.get(f"{key}_opacity", 1.0), 1.0) - 1.0) > 1e-6:
                 return True
         layout = values.get("layout") or {}
@@ -234,6 +253,7 @@ class EditSessionStore:
             "scale": float(values.get(f"{field}_scale", 1.0)),
             "font": coerce_font_family(values.get(f"{field}_font", DEFAULT_FONT_FAMILY)),
             "bold": bool(values.get(f"{field}_bold", default_bold)),
+            "italic": bool(values.get(f"{field}_italic", False)),
             "opacity": coerce_field_opacity(values.get(f"{field}_opacity", 1.0), 1.0),
         }
 
@@ -245,6 +265,7 @@ class EditSessionStore:
         scale: float | None = None,
         font: str | None = None,
         bold: bool | None = None,
+        italic: bool | None = None,
         opacity: float | None = None,
     ) -> None:
         if field not in _EDITABLE_META:
@@ -264,6 +285,8 @@ class EditSessionStore:
             values[f"{field}_font"] = coerce_font_family(font)
         if bold is not None:
             values[f"{field}_bold"] = bool(bold)
+        if italic is not None:
+            values[f"{field}_italic"] = bool(italic)
         if opacity is not None:
             values[f"{field}_opacity"] = coerce_field_opacity(opacity, 1.0)
         self._store(key, values)

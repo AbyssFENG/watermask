@@ -34,7 +34,14 @@ LAYOUT_KEYS = (
     "offset_y",
     "bar_opacity",
     "corner_radius",
+    "shadow_strength",
     "blur_radius",
+    "bar_height",
+    "side_pad",
+    "pad_left",
+    "pad_right",
+    "pad_top",
+    "pad_bottom",
     "field_positions",
 )
 
@@ -103,7 +110,14 @@ class WatermarkDocument:
         options["offset_y"] = 0.0
         options["bar_opacity"] = layout["bar_opacity"]
         options["corner_radius"] = layout["corner_radius"]
+        options["shadow_strength"] = layout["shadow_strength"]
         options["blur_radius"] = layout["blur_radius"]
+        options["bar_height"] = layout["bar_height"]
+        options["side_pad"] = layout["side_pad"]
+        options["pad_left"] = layout["pad_left"]
+        options["pad_right"] = layout["pad_right"]
+        options["pad_top"] = layout["pad_top"]
+        options["pad_bottom"] = layout["pad_bottom"]
         options["field_positions"] = dict(layout.get("field_positions") or {})
         return options
 

@@ -18,9 +18,11 @@ from PIL import Image
 from photo_watermark_studio.core.models import PhotoMetadata
 from photo_watermark_studio.core.renderer import (
     _font,
+    _font_has_dot,
     _frosted_overlay_strip,
     _metadata_lines,
     _needs_cjk,
+    _separator_width,
     format_exposure_line,
     metadata_placeholders,
     render_watermark,
@@ -312,7 +314,7 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(hidden.mode, "RGB")
 
     def test_themes_logo_and_missing_logo_do_not_crash(self) -> None:
-        for theme in ("浅色", "深色", "蓝色", "高斯模糊"):
+        for theme in ("白色", "黑色", "高斯模糊"):
             image = render_watermark(self.source, {**OPTIONS, "theme": theme, "logo_path": str(self.logo)})
             self.assertGreater(image.size[0], 0)
         for style in ("经典底栏", "极简叠加", "卡片相框", "纯文字中下"):
@@ -405,6 +407,37 @@ class RendererTests(unittest.TestCase):
             self.assertGreater(hit["w"], 0)
             self.assertGreater(hit["h"], 0)
 
+    def test_default_bar_metrics_match_explicit_100_percent(self) -> None:
+        implicit, implicit_hits = render_watermark_with_hits(self.source, {**OPTIONS, "style": "经典底栏"})
+        explicit, explicit_hits = render_watermark_with_hits(
+            self.source,
+            {**OPTIONS, "style": "经典底栏", "bar_height": 1.0, "side_pad": 1.0, "pad_top": 1.0, "pad_bottom": 1.0},
+        )
+        implicit_bar = next(hit for hit in implicit_hits if hit["key"] == "watermark_bar")
+        explicit_bar = next(hit for hit in explicit_hits if hit["key"] == "watermark_bar")
+        self.assertEqual(implicit.size, explicit.size)
+        self.assertAlmostEqual(float(implicit_bar["h"]), float(explicit_bar["h"]), delta=0.1)
+
+    def test_bar_height_increases_classic_and_overlay_bars(self) -> None:
+        for style in ("经典底栏", "极简叠加"):
+            _, short_hits = render_watermark_with_hits(
+                self.source, {**OPTIONS, "style": style, "bar_height": 0.6}
+            )
+            _, tall_hits = render_watermark_with_hits(
+                self.source, {**OPTIONS, "style": style, "bar_height": 1.8}
+            )
+            short_bar = next(hit for hit in short_hits if hit["key"] == "watermark_bar")
+            tall_bar = next(hit for hit in tall_hits if hit["key"] == "watermark_bar")
+            self.assertGreater(float(tall_bar["h"]), float(short_bar["h"]))
+
+    def test_card_side_pad_widens_canvas(self) -> None:
+        narrow = render_watermark(self.source, {**OPTIONS, "style": "卡片相框", "side_pad": 0.4})
+        default = render_watermark(self.source, {**OPTIONS, "style": "卡片相框"})
+        wide = render_watermark(self.source, {**OPTIONS, "style": "卡片相框", "side_pad": 2.0})
+        self.assertLess(narrow.size[0], default.size[0])
+        self.assertGreater(wide.size[0], default.size[0])
+        self.assertEqual(default.size[0], 320 + 44)
+
     def test_watermark_scale_affects_camera_and_lens(self) -> None:
         wide = self.folder / "wide.jpg"
         Image.new("RGB", (1600, 900), (80, 110, 140)).save(wide, quality=90)
@@ -425,6 +458,79 @@ class RendererTests(unittest.TestCase):
         large_lens = next(hit for hit in large_hits if hit["key"] == "lens")
         self.assertGreater(large_cam["h"], small_cam["h"])
         self.assertGreater(large_lens["h"], small_lens["h"])
+
+    def test_italic_shears_glyphs(self) -> None:
+        base = {
+            **OPTIONS,
+            "style": "经典底栏",
+            "brand": "",
+            "caption": "",
+            "show_logo": False,
+            "show_camera": False,
+            "show_lens": False,
+            "show_date": False,
+            "show_gps": False,
+            "exif_text": "ISO 100",
+        }
+        upright = render_watermark(self.source, {**base, "exif_italic": False})
+        slanted = render_watermark(self.source, {**base, "exif_italic": True})
+        self.assertEqual(upright.size, slanted.size)
+        self.assertNotEqual(upright.tobytes(), slanted.tobytes())
+
+    def test_default_font_keeps_middle_dot_glyph(self) -> None:
+        from PIL import ImageDraw
+
+        font = _font(32, text="NIKKOR")
+        self.assertTrue(_font_has_dot(font))
+        draw = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+        sep = "  ·  "
+        box = draw.textbbox((0, 0), sep, font=font)
+        self.assertEqual(_separator_width(draw, sep, font), box[2] - box[0])
+
+    @unittest.skipUnless(
+        os.name == "nt" and Path(r"C:\Windows\Fonts\LHANDW.TTF").is_file(),
+        "lucida handwriting required",
+    )
+    def test_missing_middle_dot_is_filled_not_a_box(self) -> None:
+        font = _font(32, text="NIKKOR", font_family="Lucida Handwriting")
+        self.assertFalse(_font_has_dot(font))
+        opts = {
+            **OPTIONS,
+            "style": "经典底栏",
+            "brand": "",
+            "caption": "",
+            "show_logo": False,
+            "show_exif": False,
+            "show_date": False,
+            "show_gps": False,
+            "shadow_strength": 0,
+            "camera_text": "NIKON",
+            "lens_text": "NIKKOR",
+            "lens_font": "Lucida Handwriting",
+        }
+        image, hits = render_watermark_with_hits(self.source, opts)
+        camera = next(hit for hit in hits if hit["key"] == "camera")
+        lens = next(hit for hit in hits if hit["key"] == "lens")
+        x0 = int(camera["x"] + camera["w"])
+        x1 = int(lens["x"])
+        self.assertGreater(x1, x0 + 2)
+        inset = max(1, (x1 - x0) // 5)
+        y0 = max(0, int(camera["y"]))
+        y1 = min(image.height, int(camera["y"] + camera["h"]))
+        dark: list[tuple[int, int]] = []
+        for y in range(y0, y1):
+            for x in range(x0 + inset, x1 - inset):
+                pixel = image.getpixel((x, y))
+                if pixel[0] + pixel[1] + pixel[2] < 180 * 3:
+                    dark.append((x, y))
+        self.assertTrue(dark)
+        min_x = min(px for px, _py in dark)
+        max_x = max(px for px, _py in dark)
+        min_y = min(py for _px, py in dark)
+        max_y = max(py for _px, py in dark)
+        center = ((min_x + max_x) // 2, (min_y + max_y) // 2)
+        self.assertIn(center, set(dark))
+        self.assertLess(max_y - min_y, (y1 - y0) * 0.55)
 
 
 if __name__ == "__main__":

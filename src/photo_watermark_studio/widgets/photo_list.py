@@ -43,6 +43,7 @@ class PhotoListPanel(QFrame):
     pathsDropped = Signal(object)
     resetPhotoRequested = Signal(str)
     openFolderRequested = Signal(str)
+    metaChanged = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -54,11 +55,11 @@ class PhotoListPanel(QFrame):
         layout.setContentsMargins(14, 14, 14, 12)
         layout.setSpacing(8)
 
-        title = QLabel("照片素材")
-        title.setObjectName("PanelTitle")
-        hint = QLabel("拖入照片，或添加 / 导入文件夹")
-        hint.setObjectName("PanelHint")
-        hint.setWordWrap(True)
+        self.title_label = QLabel("照片素材")
+        self.title_label.setObjectName("PanelTitle")
+        self.hint_label = QLabel("拖入照片，或添加 / 导入文件夹")
+        self.hint_label.setObjectName("PanelHint")
+        self.hint_label.setWordWrap(True)
 
         self.add_button = QPushButton("＋ 添加照片")
         self.add_button.setObjectName("addPhotosButton")
@@ -125,8 +126,8 @@ class PhotoListPanel(QFrame):
         self.remove_button.setProperty("role", "soft")
         self.remove_button.clicked.connect(self.removeRequested)
 
-        layout.addWidget(title)
-        layout.addWidget(hint)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.hint_label)
         layout.addWidget(self.add_button)
         layout.addLayout(row)
         layout.addLayout(filter_col)
@@ -137,9 +138,76 @@ class PhotoListPanel(QFrame):
         self._paths: list[str] = []
         self._meta: dict[str, dict[str, Any]] = {}
         self._thumbs: dict[str, QPixmap] = {}
+        self._items: dict[str, QListWidgetItem] = {}
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(2)
+        self._rail_mode = False
         self._apply_view_mode("列表")
+
+    def set_rail_mode(self, enabled: bool = True) -> None:
+        """切换为工作台底部的横向图片队列，同时保留完整素材 API。"""
+        self._rail_mode = bool(enabled)
+        self.setObjectName("ImageRail" if enabled else "Panel")
+        self.setMinimumWidth(0 if enabled else 240)
+        if not enabled:
+            return
+        self.setMinimumHeight(68)
+        self.setMaximumHeight(72)
+        self.title_label.setText("图片队列")
+        self.title_label.setObjectName("RailTitle")
+        self.title_label.setVisible(False)
+        self.count_label.setObjectName("RailCount")
+        self.count_label.setVisible(False)
+        self.hint_label.setVisible(False)
+        self.folder_button.setVisible(False)
+        self.clear_button.setVisible(False)
+        self.search_edit.setVisible(False)
+        self.sort_combo.setVisible(False)
+        self.view_combo.setVisible(False)
+        self.remove_button.setText("×")
+        self.remove_button.setToolTip("从队列移除选中的照片（不会删除原图）")
+        self.add_button.setText("＋")
+        self.add_button.setObjectName("RailAddTile")
+        self.add_button.setProperty("role", "")
+        self.add_button.setToolTip("添加照片")
+        self.add_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.list_widget.setObjectName("railList")
+        self.list_widget.setViewMode(QListWidget.ViewMode.IconMode)
+        self.list_widget.setFlow(QListWidget.Flow.LeftToRight)
+        self.list_widget.setWrapping(False)
+        self.list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.list_widget.setMovement(QListWidget.Movement.Static)
+        self.list_widget.setGridSize(QSize(72, 52))
+        self.list_widget.setIconSize(QSize(64, 36))
+        self.list_widget.setSpacing(2)
+        self.list_widget.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        root = self.layout()
+        if isinstance(root, QVBoxLayout):
+            while root.count():
+                root.takeAt(0)
+            root.setContentsMargins(8, 6, 8, 6)
+            root.setSpacing(0)
+            rail = QFrame()
+            rail.setObjectName("RailContent")
+            row = QHBoxLayout(rail)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            row.addWidget(self.list_widget, 1)
+            self.add_button.setVisible(True)
+            self.add_button.setFixedSize(32, 32)
+            self.remove_button.setVisible(True)
+            self.remove_button.setFixedSize(32, 32)
+            row.addWidget(self.add_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            row.addWidget(self.remove_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            self.rail_note = QLabel("拖动切换 · 可批量应用")
+            self.rail_note.setObjectName("RailNote")
+            self.rail_note.setVisible(False)
+            root.addWidget(rail)
+            self.title_label.style().unpolish(self.title_label)
+            self.title_label.style().polish(self.title_label)
+        self._apply_filter()
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():
@@ -174,6 +242,10 @@ class PhotoListPanel(QFrame):
         info.update(kwargs)
         self._meta[path] = info
         self._refresh_item_text(path)
+        self.metaChanged.emit(path)
+
+    def photo_meta(self, path: str) -> dict[str, Any]:
+        return dict(self._meta.get(path) or {})
 
     def set_statuses(self, mapping: dict[str, str]) -> None:
         for path, status in mapping.items():
@@ -224,25 +296,25 @@ class PhotoListPanel(QFrame):
         w = int(meta.get("width") or 0)
         h = int(meta.get("height") or 0)
         size = f"{w} × {h}" if w and h else "…"
+        if self._rail_mode:
+            return name if status == "待处理" else f"{name}\n{status}"
         if self.view_combo.currentText() == "列表":
             return f"{name}\n{size}\n{status}"
         return f"{name}\n{status}"
 
     def _refresh_item_text(self, path: str) -> None:
-        for row in range(self.list_widget.count()):
-            item = self.list_widget.item(row)
-            if item is None or item.data(Qt.ItemDataRole.UserRole) != path:
-                continue
-            item.setText(self._item_caption(path))
-            pix = self._thumbs.get(path)
-            if pix is not None and not pix.isNull():
-                item.setIcon(QIcon(pix))
-            tip = path
-            meta = self._meta.get(path) or {}
-            if meta.get("error"):
-                tip += f"\n失败：{meta['error']}"
-            item.setToolTip(tip)
-            break
+        item = self._items.get(path)
+        if item is None:
+            return
+        item.setText(self._item_caption(path))
+        pix = self._thumbs.get(path)
+        if pix is not None and not pix.isNull():
+            item.setIcon(QIcon(pix))
+        tip = path
+        meta = self._meta.get(path) or {}
+        if meta.get("error"):
+            tip += f"\n失败：{meta['error']}"
+        item.setToolTip(tip)
         self._update_count()
 
     def _visible_paths(self) -> list[str]:
@@ -258,6 +330,7 @@ class PhotoListPanel(QFrame):
         selected = set(self.selected_paths())
         self.list_widget.blockSignals(True)
         self.list_widget.clear()
+        self._items.clear()
         current_row = -1
         for index, path in enumerate(self._visible_paths()):
             item = QListWidgetItem(self._item_caption(path))
@@ -267,6 +340,7 @@ class PhotoListPanel(QFrame):
             if pix is not None and not pix.isNull():
                 item.setIcon(QIcon(pix))
             self.list_widget.addItem(item)
+            self._items[path] = item
             if current and path == current:
                 current_row = index
             if path in selected:
@@ -287,6 +361,8 @@ class PhotoListPanel(QFrame):
         self._apply_filter()
 
     def _apply_view_mode(self, mode: str) -> None:
+        if self._rail_mode:
+            return
         if mode == "网格":
             self.list_widget.setViewMode(QListWidget.ViewMode.IconMode)
             self.list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
@@ -300,6 +376,9 @@ class PhotoListPanel(QFrame):
 
     def _update_count(self) -> None:
         total = len(self._paths)
+        if self._rail_mode:
+            self.count_label.setText(f"{total} 张照片")
+            return
         selected = len(self.list_widget.selectedItems())
         self.count_label.setText(f"已选 {selected} / 共 {total}")
 

@@ -1,4 +1,4 @@
-"""光影水印 Photo Watermark Studio。"""
+"""停下时光 · Studio。"""
 from photo_watermark_studio.qt_bootstrap import ensure_qt_dlls
 
 ensure_qt_dlls()

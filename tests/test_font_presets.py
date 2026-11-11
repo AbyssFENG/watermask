@@ -18,9 +18,10 @@ from photo_watermark_studio.core.font_presets import (
     available_font_names,
     available_font_presets,
     coerce_font_family,
+    font_covers_cjk,
     resolve_font_path,
 )
-from photo_watermark_studio.core.renderer import _font
+from photo_watermark_studio.core.renderer import _font, _resolved_font_path
 from photo_watermark_studio.core.settings_store import coerce_field_opacity, coerce_settings
 
 
@@ -30,6 +31,11 @@ class FontPresetTests(unittest.TestCase):
         self.assertEqual(coerce_font_family(None), DEFAULT_FONT_FAMILY)
         self.assertEqual(coerce_font_family("不存在的字体"), DEFAULT_FONT_FAMILY)
         self.assertEqual(coerce_font_family("楷体"), "楷体")
+        self.assertEqual(coerce_font_family("微软雅黑"), "微软雅黑")
+        self.assertEqual(coerce_font_family("Georgia"), "Georgia")
+        self.assertFalse(font_covers_cjk("Georgia"))
+        self.assertTrue(font_covers_cjk("宋体"))
+        self.assertTrue(font_covers_cjk(DEFAULT_FONT_FAMILY))
 
     def test_coerce_settings_keeps_valid_field_font(self) -> None:
         data = coerce_settings({"camera_font": "华文行楷", "brand_font": "楷体"})
@@ -73,6 +79,30 @@ class FontPresetTests(unittest.TestCase):
             path = getattr(font, "path", None)
             self.assertIsNotNone(path)
             self.assertTrue(str(path).lower().endswith("simkai.ttf"))
+
+    @unittest.skipUnless(os.name == "nt" and Path(r"C:\Windows\Fonts\georgia.ttf").is_file(), "georgia required")
+    def test_latin_font_falls_back_for_cjk(self) -> None:
+        _resolved_font_path.cache_clear()
+        latin = _resolved_font_path("Georgia", False, False, False)
+        cjk = _resolved_font_path("Georgia", False, False, True)
+        self.assertTrue(latin.lower().endswith("georgia.ttf"))
+        self.assertTrue(cjk.lower().endswith("msyh.ttc"))
+
+    @unittest.skipUnless(
+        os.name == "nt" and Path(r"C:\Windows\Fonts\NotoSansSC-VF.ttf").is_file(),
+        "noto sans sc required",
+    )
+    def test_variable_cjk_font_uses_regular_weight(self) -> None:
+        from PIL import Image, ImageDraw, ImageFont
+
+        def ink(font: ImageFont.ImageFont) -> int:
+            image = Image.new("L", (80, 80), 0)
+            ImageDraw.Draw(image).text((4, 4), "永", font=font, fill=255)
+            return sum(1 for px in image.get_flattened_data() if px)
+
+        regular = _font(48, text="永", font_family="思源黑体")
+        thin = ImageFont.truetype(r"C:\Windows\Fonts\NotoSansSC-VF.ttf", 48)
+        self.assertGreater(ink(regular), ink(thin))
 
 
 if __name__ == "__main__":

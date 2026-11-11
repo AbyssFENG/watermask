@@ -2,8 +2,12 @@
 """Pillow 水印合成。算法自 Tkinter 版本原样迁出，不依赖界面库。"""
 from __future__ import annotations
 
+import math
 import os
+import re
+import threading
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -12,6 +16,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from photo_watermark_studio.core.font_presets import (
     DEFAULT_FONT_FAMILY,
     coerce_font_family,
+    font_covers_cjk,
     resolve_font_path,
 )
 from photo_watermark_studio.core.metadata import read_photo_metadata
@@ -19,10 +24,12 @@ from photo_watermark_studio.core.models import PhotoMetadata
 from photo_watermark_studio.core.settings_store import (
     DEFAULT_FIELD_BOLD,
     coerce_field_opacity,
+    coerce_hex_color,
     default_field_positions,
     effective_style,
     is_custom_style,
 )
+from photo_watermark_studio.paths import resource_dir
 
 
 def _needs_cjk(text: str) -> bool:
@@ -40,18 +47,16 @@ def _needs_cjk(text: str) -> bool:
     return False
 
 
-def _font(
-    size: int,
-    bold: bool = False,
-    italic: bool = False,
-    text: str = "",
-    font_family: str = DEFAULT_FONT_FAMILY,
-) -> ImageFont.ImageFont:
-    size = max(9, int(size))
-    cjk = _needs_cjk(text)
+def _font_candidate_paths(
+    bold: bool,
+    italic: bool,
+    cjk: bool,
+    font_family: str,
+) -> tuple[str, ...]:
     candidates: list[str] = []
     preferred = resolve_font_path(font_family)
-    if preferred:
+    # 英文衬线没有中文字形，含中文时改走后面的雅黑，避免方框。
+    if preferred and (not cjk or font_covers_cjk(font_family)):
         candidates.append(preferred)
     if os.name == "nt":
         cjk_regular = [
@@ -98,12 +103,73 @@ def _font(
         else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     ]
-    for fp in candidates:
+    return tuple(candidates)
+
+
+def _tune_font(font: ImageFont.FreeTypeFont, bold: bool) -> ImageFont.FreeTypeFont:
+    """可变字体默认常常是极细字重，水印改用 Regular，加粗时用 Bold。"""
+    try:
+        raw_names = font.get_variation_names()
+    except Exception:
+        return font
+    names: list[str] = []
+    for item in raw_names:
+        if isinstance(item, bytes):
+            names.append(item.decode("utf-8", "replace"))
+        else:
+            names.append(str(item))
+    target = "Bold" if bold and "Bold" in names else ("Regular" if "Regular" in names else "")
+    if not target:
+        return font
+    try:
+        font.set_variation_by_name(target)
+    except Exception:
+        return font
+    return font
+
+
+@lru_cache(maxsize=48)
+def _resolved_font_path(font_family: str, bold: bool, italic: bool, cjk: bool) -> str:
+    """候选字体只探测一次，之后按路径复用。"""
+    for fp in _font_candidate_paths(bold, italic, cjk, font_family):
         try:
-            return ImageFont.truetype(fp, size=size)
+            ImageFont.truetype(fp, size=9)
+            return fp
         except Exception:
             continue
-    return ImageFont.load_default()
+    return ""
+
+
+_font_lock = threading.Lock()
+_font_cache: dict[tuple[str, int, bool], ImageFont.ImageFont] = {}
+_FONT_CACHE_LIMIT = 96
+
+
+def _font(
+    size: int,
+    bold: bool = False,
+    italic: bool = False,
+    text: str = "",
+    font_family: str = DEFAULT_FONT_FAMILY,
+) -> ImageFont.ImageFont:
+    size = max(9, int(size))
+    family = coerce_font_family(font_family)
+    path = _resolved_font_path(family, bool(bold), bool(italic), _needs_cjk(text))
+    if not path:
+        return ImageFont.load_default()
+    key = (path, size, bool(bold))
+    with _font_lock:
+        cached = _font_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            font = _tune_font(ImageFont.truetype(path, size=size), bool(bold))
+        except Exception:
+            return ImageFont.load_default()
+        _font_cache[key] = font
+        if len(_font_cache) > _FONT_CACHE_LIMIT:
+            _font_cache.pop(next(iter(_font_cache)))
+        return font
 
 
 def _fit_font(
@@ -115,13 +181,28 @@ def _fit_font(
     italic: bool = False,
     font_family: str = DEFAULT_FONT_FAMILY,
 ) -> ImageFont.ImageFont:
-    size = max(9, int(preferred))
-    while size > 9:
-        f = _font(size, bold, italic, text=text, font_family=font_family)
-        box = draw.textbbox((0, 0), text, font=f)
-        if box[2] - box[0] <= max_width:
-            return f
-        size -= 1
+    preferred = max(9, int(preferred))
+
+    def measure(size: int) -> tuple[ImageFont.ImageFont, int]:
+        font = _font(size, bold, italic, text=text, font_family=font_family)
+        box = draw.textbbox((0, 0), text, font=font)
+        return font, box[2] - box[0]
+
+    font, width = measure(preferred)
+    if width <= max_width or preferred <= 9:
+        return font
+    low, high = 9, preferred - 1
+    best: ImageFont.ImageFont | None = None
+    while low <= high:
+        mid = (low + high) // 2
+        trial, trial_width = measure(mid)
+        if trial_width <= max_width:
+            best = trial
+            low = mid + 1
+        else:
+            high = mid - 1
+    if best is not None:
+        return best
     return _font(9, bold, italic, text=text, font_family=font_family)
 
 
@@ -143,25 +224,162 @@ def _load_logo(logo_path: str, max_size: tuple[int, int]) -> Optional[Image.Imag
         return None
 
 
-def _color_theme(theme: str) -> dict[str, tuple[int, int, int]]:
-    if theme == "深色":
-        return {"bar": (20, 27, 38), "text": (246, 248, 252), "muted": (191, 200, 213), "outer": (24, 32, 45)}
-    if theme == "蓝色":
-        return {"bar": (232, 241, 253), "text": (27, 49, 79), "muted": (80, 103, 134), "outer": (117, 160, 211)}
+def _logo_badge(mark: str, diameter: int, color: tuple[int, int, int]) -> Image.Image:
+    """无 Logo 文件时的圆形徽记，先放大绘制再缩小以抗锯齿。"""
+    diameter = max(12, int(diameter))
+    ss = 4
+    size = diameter * ss
+    badge = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(badge)
+    rgba = (*color[:3], 255)
+    stroke = max(ss, int(size * 0.06))
+    d.ellipse((stroke // 2, stroke // 2, size - 1 - stroke // 2, size - 1 - stroke // 2), outline=rgba, width=stroke)
+    c = size / 2
+    if mark == "◉":
+        r = size * 0.2
+        d.ellipse((c - r, c - r, c + r, c + r), fill=rgba)
+    elif mark == "✦":
+        outer, inner = size * 0.3, size * 0.075
+        points = []
+        for i in range(8):
+            angle = math.pi / 4 * i - math.pi / 2
+            radius = outer if i % 2 == 0 else inner
+            points.append((c + radius * math.cos(angle), c + radius * math.sin(angle)))
+        d.polygon(points, fill=rgba)
+    else:
+        font = _font(int(size * 0.5), True, text=mark or "L")
+        box = d.textbbox((0, 0), mark or "L", font=font)
+        tx = c - (box[0] + box[2]) / 2
+        ty = c - (box[1] + box[3]) / 2
+        d.text((tx, ty), mark or "L", font=font, fill=rgba)
+    return badge.resize((diameter, diameter), Image.Resampling.LANCZOS)
+
+
+def _with_opacity(image: Image.Image, opacity: float) -> Image.Image:
+    if opacity >= 0.999:
+        return image
+    rgba = image.convert("RGBA")
+    alpha = rgba.getchannel("A").point(lambda v: int(round(v * opacity)))
+    rgba.putalpha(alpha)
+    return rgba
+
+
+def _logo_scale(options: dict[str, Any]) -> float:
+    try:
+        return min(1.9, max(0.5, float(options.get("logo_scale", 1.0))))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _logo_opacity(options: dict[str, Any]) -> float:
+    try:
+        return min(1.0, max(0.2, float(options.get("logo_opacity", 1.0))))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _fit_logo(logo: Image.Image, max_h: float) -> Image.Image:
+    thumb = logo.copy()
+    max_h = max(1, int(max_h))
+    if thumb.height > max_h:
+        ratio = max_h / thumb.height
+        thumb = thumb.resize((max(1, int(thumb.width * ratio)), max_h), Image.Resampling.LANCZOS)
+    return thumb
+
+
+def _card_radius(options: dict[str, Any], ref: int) -> int:
+    """卡片照片圆角：0 表示默认圆角，其余按 760px 预览宽度等比换算。"""
+    try:
+        radius = float(options.get("corner_radius", 0) or 0)
+    except (TypeError, ValueError):
+        radius = 0.0
+    if radius <= 0:
+        return max(12, int(ref * 0.018))
+    return max(1, int(round(ref * radius / 600)))
+
+
+def _parse_hex_rgb(raw: Any) -> tuple[int, int, int] | None:
+    color = coerce_hex_color(raw)
+    if not color:
+        return None
+    body = color[1:]
+    return int(body[0:2], 16), int(body[2:4], 16), int(body[4:6], 16)
+
+
+def _color_theme(theme: str, bg_color: Any = "") -> dict[str, tuple[int, int, int]]:
     if theme == "高斯模糊":
         # 底栏/相框由模糊图填充；色值只作文字配色与回退。
         return {"bar": (28, 30, 34), "text": (250, 251, 252), "muted": (205, 212, 220), "outer": (22, 24, 28)}
-    return {"bar": (250, 250, 249), "text": (23, 27, 34), "muted": (96, 103, 114), "outer": (231, 237, 244)}
+    rgb = _parse_hex_rgb(bg_color)
+    if rgb is not None:
+        r, g, b = rgb
+        luma = 0.299 * r + 0.587 * g + 0.114 * b
+        if luma < 140:
+            return {"bar": rgb, "text": (246, 248, 252), "muted": (191, 200, 213), "outer": rgb}
+        return {"bar": rgb, "text": (23, 27, 34), "muted": (96, 103, 114), "outer": rgb}
+    if theme in {"黑色", "深色"}:
+        return {"bar": (12, 12, 14), "text": (246, 248, 252), "muted": (191, 200, 213), "outer": (8, 8, 10)}
+    return {"bar": (255, 255, 255), "text": (23, 27, 34), "muted": (96, 103, 114), "outer": (255, 255, 255)}
+
+
+def _shadow_params(options: dict[str, Any], frame: int) -> tuple[int, int]:
+    """返回卡片阴影 (alpha, blur_radius)。strength=25 与旧固定值完全一致。"""
+    try:
+        strength = int(round(float(options.get("shadow_strength", 25))))
+    except (TypeError, ValueError):
+        strength = 25
+    strength = max(0, min(100, strength))
+    if strength <= 0:
+        return 0, 0
+    if strength == 25:
+        return 70, max(6, int(frame * 0.22))
+    scale = strength / 25.0
+    alpha = max(1, min(190, int(round(70 * scale))))
+    blur_scale = 0.65 + 0.35 * scale
+    blur = max(3, int(round(max(6, int(frame * 0.22)) * blur_scale)))
+    return alpha, blur
+
+
+def _paste_card_shadow(
+    canvas: Image.Image,
+    out_size: tuple[int, int],
+    box: tuple[int, int, int, int],
+    radius: int,
+    options: dict[str, Any],
+    frame: int,
+) -> Image.Image:
+    alpha, blur = _shadow_params(options, frame)
+    if alpha <= 0:
+        return canvas
+    shadow = Image.new("RGBA", out_size, (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).rounded_rectangle(box, radius=radius, fill=(16, 28, 45, alpha))
+    shadow = _scaled_blur(shadow, blur)
+    return Image.alpha_composite(canvas.convert("RGBA"), shadow).convert("RGB")
 
 
 def _is_frosted_theme(theme: str) -> bool:
     return theme in ("高斯模糊", "高斯模糊+变暗")
 
 
+def _scaled_blur(image: Image.Image, radius: float) -> Image.Image:
+    """大半径时先缩小再模糊，再拉回原尺寸。小图仍直接模糊，避免色带被压糊。"""
+    radius = max(1.0, float(radius))
+    if radius < 8.0 or max(image.size) < 640:
+        return image.filter(ImageFilter.GaussianBlur(radius=radius))
+    factor = 8 if radius >= 32.0 else 4
+    width, height = image.size
+    small_w = max(1, width // factor)
+    small_h = max(1, height // factor)
+    if small_w < 16 or small_h < 16:
+        return image.filter(ImageFilter.GaussianBlur(radius=radius))
+    small = image.resize((small_w, small_h), Image.Resampling.BILINEAR)
+    blurred = small.filter(ImageFilter.GaussianBlur(radius=max(1.0, radius / factor)))
+    return blurred.resize((width, height), Image.Resampling.BILINEAR)
+
+
 def _gaussian_blur(image: Image.Image, radius: float) -> Image.Image:
     """仅做高斯模糊，不变暗。"""
-    src = image.convert("RGB")
-    return src.filter(ImageFilter.GaussianBlur(radius=max(1.0, float(radius))))
+    return _scaled_blur(image.convert("RGB"), radius)
 
 
 def _frosted_bar(base: Image.Image, bar_h: int) -> Image.Image:
@@ -200,16 +418,65 @@ def _frosted_frame(base: Image.Image, size: tuple[int, int], radius: float) -> I
 
 
 def format_exposure_line(md: PhotoMetadata) -> str:
+    return compose_exposure_line(
+        focal=md.focal,
+        aperture=md.aperture,
+        shutter=md.shutter,
+        iso=md.iso,
+    )
+
+
+def compose_exposure_line(
+    *,
+    focal: str = "",
+    aperture: str = "",
+    shutter: str = "",
+    iso: str = "",
+) -> str:
+    """把四格曝光拼成与 format_exposure_line 一致的字符串：ISO  |  焦距  |  光圈  |  快门。"""
     detail_parts: list[str] = []
-    if md.iso:
-        detail_parts.append(f"ISO {md.iso}")
-    if md.focal:
-        detail_parts.append(md.focal.upper())
-    if md.aperture:
-        detail_parts.append(md.aperture.upper())
-    if md.shutter:
-        detail_parts.append(md.shutter.upper())
+    iso_clean = str(iso or "").strip()
+    if iso_clean:
+        iso_upper = iso_clean.upper()
+        if iso_upper.startswith("ISO"):
+            iso_num = iso_clean[3:].strip()
+            detail_parts.append(f"ISO {iso_num}" if iso_num else "ISO")
+        else:
+            detail_parts.append(f"ISO {iso_clean}")
+    for raw in (focal, aperture, shutter):
+        text = str(raw or "").strip()
+        if text:
+            detail_parts.append(text.upper())
     return "  |  ".join(detail_parts)
+
+
+def parse_exposure_line(text: str) -> dict[str, str]:
+    """把曝光参数字符串拆回 focal / aperture / shutter / iso 四项。"""
+    out = {"focal": "", "aperture": "", "shutter": "", "iso": ""}
+    raw = str(text or "").strip()
+    if not raw:
+        return out
+    tokens = [part.strip() for part in re.split(r"\s*[|·]\s*", raw) if part.strip()]
+    leftovers: list[str] = []
+    for token in tokens:
+        upper = token.upper()
+        if upper.startswith("ISO"):
+            val = token[3:].strip()
+            out["iso"] = val or token
+        elif upper.endswith("MM") and not out["focal"]:
+            out["focal"] = token
+        elif (upper.startswith("F/") or upper.startswith("F")) and any(ch.isdigit() for ch in upper) and not out["aperture"] and "/" in upper and not upper.endswith("S"):
+            out["aperture"] = token
+        elif (upper.endswith("S") or "/" in upper) and any(ch.isdigit() for ch in upper) and not out["shutter"]:
+            out["shutter"] = token
+        elif upper.startswith("F") and any(ch.isdigit() for ch in upper) and not out["aperture"]:
+            out["aperture"] = token
+        else:
+            leftovers.append(token)
+    for key in ("focal", "aperture", "shutter", "iso"):
+        if not out[key] and leftovers:
+            out[key] = leftovers.pop(0)
+    return out
 
 
 def metadata_placeholders(md: PhotoMetadata) -> dict[str, str]:
@@ -239,6 +506,10 @@ def _field_bold(options: dict[str, Any], field: str) -> bool:
     if bold_key in options:
         return bool(options.get(bold_key))
     return bool(DEFAULT_FIELD_BOLD.get(field, False))
+
+
+def _field_italic(options: dict[str, Any], field: str) -> bool:
+    return bool(options.get(f"{field}_italic", False))
 
 
 def _field_opacity(options: dict[str, Any], field: str) -> float:
@@ -278,6 +549,7 @@ class TextSegment:
     sep_before: str = ""
     font_family: str = DEFAULT_FONT_FAMILY
     bold: bool = False
+    italic: bool = False
     opacity: float = 1.0
 
 
@@ -295,6 +567,7 @@ def _metadata_segment_lines(
                     key="camera",
                     font_family=_field_font(options, "camera_font"),
                     bold=_field_bold(options, "camera"),
+                    italic=_field_italic(options, "camera"),
                     opacity=_field_opacity(options, "camera"),
                 )
             )
@@ -310,6 +583,7 @@ def _metadata_segment_lines(
                     sep_before=sep,
                     font_family=_field_font(options, "lens_font"),
                     bold=_field_bold(options, "lens"),
+                    italic=_field_italic(options, "lens"),
                     opacity=_field_opacity(options, "lens"),
                 )
             )
@@ -326,6 +600,7 @@ def _metadata_segment_lines(
                     key="exif",
                     font_family=_field_font(options, "exif_font"),
                     bold=_field_bold(options, "exif"),
+                    italic=_field_italic(options, "exif"),
                     opacity=_field_opacity(options, "exif"),
                 )
             )
@@ -341,6 +616,7 @@ def _metadata_segment_lines(
                     key="date",
                     font_family=_field_font(options, "date_font"),
                     bold=_field_bold(options, "date"),
+                    italic=_field_italic(options, "date"),
                     opacity=_field_opacity(options, "date"),
                 )
             )
@@ -356,6 +632,7 @@ def _metadata_segment_lines(
                     sep_before=sep,
                     font_family=_field_font(options, "gps_font"),
                     bold=_field_bold(options, "gps"),
+                    italic=_field_italic(options, "gps"),
                     opacity=_field_opacity(options, "gps"),
                 )
             )
@@ -364,6 +641,99 @@ def _metadata_segment_lines(
 
 def _line_plain_text(segments: list[TextSegment]) -> str:
     return "".join(f"{seg.sep_before}{seg.text}" for seg in segments)
+
+
+_DOT_SEP = "·"
+_dot_support: dict[int, bool] = {}
+
+
+def _mask_bytes(mask: Any) -> bytes:
+    raw = getattr(mask, "tobytes", None)
+    if callable(raw):
+        try:
+            return raw()
+        except Exception:
+            pass
+    return bytes(mask)
+
+
+def _font_has_dot(font: ImageFont.ImageFont) -> bool:
+    """当前字体是否真有间隔点。缺字时 getmask 与 .notdef 相同，会画成空心方框。"""
+    key = id(font)
+    cached = _dot_support.get(key)
+    if cached is not None:
+        return cached
+    try:
+        wanted = font.getmask(_DOT_SEP)
+        missing = font.getmask("\ue000")
+        has = _mask_bytes(wanted) != _mask_bytes(missing)
+    except Exception:
+        has = False
+    if len(_dot_support) > 128:
+        _dot_support.pop(next(iter(_dot_support)))
+    _dot_support[key] = has
+    return has
+
+
+def _is_dot_separator(sep: str) -> bool:
+    return sep.strip() == _DOT_SEP
+
+
+def _dot_diameter(font: ImageFont.ImageFont) -> int:
+    size = max(9, int(getattr(font, "size", 16) or 16))
+    return max(2, int(round(size * 0.18)))
+
+
+def _needs_drawn_dot(sep: str, font: ImageFont.ImageFont) -> bool:
+    return bool(sep) and _is_dot_separator(sep) and not _font_has_dot(font)
+
+
+def _separator_width(draw: ImageDraw.ImageDraw, sep: str, font: ImageFont.ImageFont) -> int:
+    """间隔宽度。字体没有间隔点时按两侧空格加实心圆计算，避免用缺字方框的宽度。"""
+    if _needs_drawn_dot(sep, font):
+        space = draw.textbbox((0, 0), "  ", font=font)
+        gap = max(2, space[2] - space[0])
+        return gap + _dot_diameter(font) + gap
+    box = draw.textbbox((0, 0), sep, font=font)
+    return box[2] - box[0]
+
+
+def _blit_dot_separator(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    x: float,
+    y: float,
+    width: int,
+    font: ImageFont.ImageFont,
+    fill: tuple[int, ...],
+    *,
+    outline: bool,
+) -> None:
+    """在大写字母中线画实心圆，左右留白与两个空格一致。"""
+    rgba = fill if len(fill) == 4 else (*fill[:3], 255)
+    dot = _dot_diameter(font)
+    cap = draw.textbbox((0, 0), "H", font=font)
+    cy = float(y) + (cap[1] + cap[3]) / 2.0
+    cx = float(x) + width / 2.0
+    radius = dot / 2.0
+    ring = max(1, int(round(dot * 0.35))) if outline else 0
+    pad = ring + 2
+    left = int(math.floor(cx - radius - pad))
+    top = int(math.floor(cy - radius - pad))
+    right = int(math.ceil(cx + radius + pad))
+    bottom = int(math.ceil(cy + radius + pad))
+    sprite = Image.new("RGBA", (max(1, right - left), max(1, bottom - top)), (0, 0, 0, 0))
+    sprite_draw = ImageDraw.Draw(sprite)
+    local_x = cx - left
+    local_y = cy - top
+    box = (local_x - radius, local_y - radius, local_x + radius, local_y + radius)
+    if ring:
+        sprite_draw.ellipse(
+            (box[0] - ring, box[1] - ring, box[2] + ring, box[3] + ring),
+            fill=(0, 0, 0, min(160, rgba[3])),
+        )
+    sprite_draw.ellipse(box, fill=rgba)
+    image.paste(sprite, (left, top), sprite)
 
 
 def _measure_segments(
@@ -376,8 +746,7 @@ def _measure_segments(
     total = 0
     for seg, text, font in zip(segments, texts, fonts):
         if seg.sep_before:
-            sep_box = draw.textbbox((0, 0), seg.sep_before, font=font)
-            total += sep_box[2] - sep_box[0]
+            total += _separator_width(draw, seg.sep_before, font)
         box = draw.textbbox((0, 0), text, font=font)
         width = box[2] - box[0]
         widths.append(width)
@@ -452,8 +821,7 @@ def _fit_segment_fonts(
         sep_total = 0
         for seg, font in zip(segments, fonts):
             if seg.sep_before:
-                sep_box = draw.textbbox((0, 0), seg.sep_before, font=font)
-                sep_total += sep_box[2] - sep_box[0]
+                sep_total += _separator_width(draw, seg.sep_before, font)
         budget = max(8 * len(segments), max_width - sep_total)
         weight = sum(widths) or 1
         for idx, (text, font, width) in enumerate(zip(texts, fonts, widths)):
@@ -500,14 +868,38 @@ def _draw_text_with_outline(
     stroke: int = 1,
 ) -> None:
     """1px 描边，无色块底，保证浅色图上也看得清。"""
-    x, y = xy
     if stroke > 0:
-        for dx in range(-stroke, stroke + 1):
-            for dy in range(-stroke, stroke + 1):
-                if dx == 0 and dy == 0:
-                    continue
-                draw.text((x + dx, y + dy), text, font=font, fill=outline)
-    draw.text((x, y), text, font=font, fill=fill)
+        draw.text(
+            xy,
+            text,
+            font=font,
+            fill=fill,
+            stroke_width=int(stroke),
+            stroke_fill=outline,
+        )
+        return
+    draw.text(xy, text, font=font, fill=fill)
+
+
+_ITALIC_SHEAR = 0.32
+
+
+def _italic_extra(font: ImageFont.ImageFont) -> int:
+    size = int(getattr(font, "size", 16) or 16)
+    return max(2, int(round(size * _ITALIC_SHEAR)))
+
+
+def _slant_image(image: Image.Image) -> Image.Image:
+    """把文字精灵向右倾斜。底边不动，顶边右移，中文没有斜体字库时也有效。"""
+    width, height = image.size
+    extra = max(2, int(round(height * _ITALIC_SHEAR)))
+    return image.transform(
+        (width + extra, height),
+        Image.Transform.AFFINE,
+        (1, _ITALIC_SHEAR, -_ITALIC_SHEAR * height, 0, 1, 0),
+        resample=Image.Resampling.BICUBIC,
+        fillcolor=(0, 0, 0, 0),
+    )
 
 
 def _blit_text(
@@ -519,10 +911,17 @@ def _blit_text(
     fill: tuple[int, ...],
     *,
     outline: bool = False,
+    italic: bool = False,
 ) -> None:
     """在 RGB/RGBA 画布上绘制文字；fill 含 alpha 时正确半透明。"""
     rgba = fill if len(fill) == 4 else (*fill[:3], 255)
     x, y = float(xy[0]), float(xy[1])
+    if italic:
+        spr = _slant_image(_make_text_sprite(text, font, rgba, use_outline=outline))
+        bb = draw.textbbox((0, 0), text, font=font)
+        pad = 2 if outline else 1
+        image.paste(spr, (int(round(x + bb[0] - pad)), int(round(y + bb[1] - pad))), spr)
+        return
     if rgba[3] >= 255:
         if outline:
             _draw_text_with_outline(draw, (x, y), text, font, rgba[:3] if image.mode != "RGBA" else rgba)
@@ -568,17 +967,17 @@ def _draw_segments(
     fitted = _fit_segment_fonts(draw, segments, max_width, preferred)
     if not fitted:
         return 0
-    pieces: list[tuple[str, ImageFont.ImageFont, int, str, float]] = []
+    pieces: list[tuple[str, ImageFont.ImageFont, int, str, float, bool]] = []
     total = 0
     for seg, text, font, text_width in fitted:
         opacity = coerce_field_opacity(seg.opacity, 1.0)
         if seg.sep_before:
-            sep_box = draw.textbbox((0, 0), seg.sep_before, font=font)
-            sep_width = sep_box[2] - sep_box[0]
-            pieces.append((seg.sep_before, font, sep_width, "", opacity))
+            sep_width = _separator_width(draw, seg.sep_before, font)
+            pieces.append((seg.sep_before, font, sep_width, "", opacity, False))
             total += sep_width
-        pieces.append((text, font, text_width, seg.key, opacity))
-        total += text_width
+        slant = _italic_extra(font) if seg.italic else 0
+        pieces.append((text, font, text_width + slant, seg.key, opacity, bool(seg.italic)))
+        total += text_width + slant
     if align == "right":
         x = float(anchor_x - total)
     elif align == "center":
@@ -587,15 +986,51 @@ def _draw_segments(
         x = float(anchor_x)
     tallest = 9
     image = draw._image  # noqa: SLF001 — Pillow ImageDraw 绑定画布
-    for text, font, width, key, opacity in pieces:
+    for text, font, width, key, opacity, italic in pieces:
         seg_fill = _apply_fill_opacity(fill, opacity)
-        _blit_text(image, draw, (x, y), text, font, seg_fill, outline=outline)
+        if not key and _needs_drawn_dot(text, font):
+            _blit_dot_separator(image, draw, x, float(y), width, font, seg_fill, outline=outline)
+        else:
+            _blit_text(image, draw, (x, y), text, font, seg_fill, outline=outline, italic=italic)
         font_size = int(getattr(font, "size", 9) or 9)
         tallest = max(tallest, font_size)
         if hits is not None and key:
             _append_hit(hits, key, text, x, float(y), float(width), float(font_size + 4))
         x += width
     return tallest
+
+
+def _segments_width(
+    draw: ImageDraw.ImageDraw,
+    segments: list[TextSegment],
+    max_width: int,
+    preferred: int,
+) -> int:
+    total = 0
+    for seg, _text, font, width in _fit_segment_fonts(draw, segments, max_width, preferred):
+        if seg.sep_before:
+            total += _separator_width(draw, seg.sep_before, font)
+        total += width + (_italic_extra(font) if seg.italic else 0)
+    return total
+
+
+def _draw_divider(
+    draw: ImageDraw.ImageDraw,
+    x: float,
+    top: int,
+    height: int,
+    ref: int,
+    fill: tuple[int, ...],
+) -> float:
+    """品牌与参数之间的细竖线，返回竖线右侧 x。"""
+    width = max(1, int(round(ref * 0.002)))
+    y0 = top + int(height * 0.24)
+    y1 = top + int(height * 0.76)
+    mode = getattr(draw, "_image", None)
+    color = fill if mode is not None and mode.mode == "RGBA" else tuple(fill[:3])
+    xi = int(round(x))
+    draw.rectangle((xi, y0, xi + width - 1, y1), fill=color)
+    return float(xi + width)
 
 
 def _metadata_lines(md: PhotoMetadata, options: dict[str, Any]) -> tuple[str, str, str]:
@@ -641,6 +1076,87 @@ def _bar_alpha(options: dict[str, Any], default: int = 172) -> int:
     return max(40, min(255, int(255 * opacity)))
 
 
+def _layout_factor(
+    options: dict[str, Any],
+    key: str,
+    lo: float,
+    hi: float,
+    default: float = 1.0,
+) -> float:
+    try:
+        value = float(options.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return min(hi, max(lo, value))
+
+
+def _pads_are_default(options: dict[str, Any]) -> bool:
+    top = _layout_factor(options, "pad_top", 0.4, 2.2)
+    bottom = _layout_factor(options, "pad_bottom", 0.4, 2.2)
+    return abs(top - 1.0) < 1e-6 and abs(bottom - 1.0) < 1e-6
+
+
+def _side_factors(options: dict[str, Any]) -> tuple[float, float]:
+    """左右边距比例；旧配置没有 pad_left/pad_right 时沿用 side_pad。"""
+    side = _layout_factor(options, "side_pad", 0.4, 2.2)
+    left = _layout_factor(options, "pad_left", 0.4, 2.2, side)
+    right = _layout_factor(options, "pad_right", 0.4, 2.2, side)
+    return left, right
+
+
+def _bar_size(base_bar: int, base_margin: int, options: dict[str, Any]) -> tuple[int, int, int]:
+    """底栏高度和左右边距。比例为 1 时保持原来的像素。"""
+    bar_h = max(36, int(round(base_bar * _layout_factor(options, "bar_height", 0.5, 2.0))))
+    left_f, right_f = _side_factors(options)
+    left = max(8, int(round(base_margin * left_f)))
+    right = max(8, int(round(base_margin * right_f)))
+    return bar_h, left, right
+
+
+def _bar_insets(bar_h: int, content_h: int, options: dict[str, Any]) -> tuple[int, int, int]:
+    """返回 (底栏高, 内容距上沿, 内容距下沿)。上下边距都是 100% 时仍垂直居中。"""
+    if _pads_are_default(options):
+        top = max(3, (bar_h - content_h) // 2)
+        return bar_h, top, max(0, bar_h - content_h - top)
+    top_factor = _layout_factor(options, "pad_top", 0.4, 2.2)
+    bottom_factor = _layout_factor(options, "pad_bottom", 0.4, 2.2)
+    base_inset = max(3, int(bar_h * 0.08))
+    top = max(0, int(round(base_inset * top_factor)))
+    bottom = max(0, int(round(base_inset * bottom_factor)))
+    needed = max(1, content_h) + top + bottom
+    if needed > bar_h:
+        bar_h = needed
+    return bar_h, top, bottom
+
+
+def _frame_box(
+    base_pad: int, base_footer: int, options: dict[str, Any]
+) -> tuple[int, int, int, int, int]:
+    """相框边距：左、上、页脚、下、右。比例为 1 时等于传入的基准像素。"""
+    left_f, right_f = _side_factors(options)
+    pad_left = max(8, int(round(base_pad * left_f)))
+    pad_right = max(8, int(round(base_pad * right_f)))
+    pad_top = max(8, int(round(base_pad * _layout_factor(options, "pad_top", 0.4, 2.2))))
+    pad_bottom = max(8, int(round(base_pad * _layout_factor(options, "pad_bottom", 0.4, 2.2))))
+    footer = max(36, int(round(base_footer * _layout_factor(options, "bar_height", 0.5, 2.0))))
+    return pad_left, pad_top, footer, pad_bottom, pad_right
+
+
+def _inner_item_y(
+    bar_top: int,
+    bar_h: int,
+    item_h: int,
+    top_pad: int,
+    bottom_pad: int,
+    *,
+    default_pads: bool,
+) -> int:
+    if default_pads:
+        return bar_top + (bar_h - item_h) // 2
+    room = max(0, bar_h - top_pad - bottom_pad - item_h)
+    return bar_top + top_pad + room // 2
+
+
 def render_watermark(source_path: str | Path, options: dict[str, Any]) -> Image.Image:
     """Render the image with watermark and return an RGB image."""
     image, _hits = render_watermark_with_hits(source_path, options)
@@ -658,44 +1174,76 @@ def render_from_document(source_path: str | Path, document: Any) -> Image.Image:
 
 def _freeform_field_items(
     md: PhotoMetadata, options: dict[str, Any], brand: str, caption: str
-) -> list[tuple[str, str, float, bool]]:
-    """自定义模式下的独立字段列表：(key, text, scale, bold)。"""
-    items: list[tuple[str, str, float, bool]] = []
+) -> list[tuple[str, str, float, bool, bool]]:
+    """自定义模式下的独立字段列表：(key, text, scale, bold, italic)。"""
+    items: list[tuple[str, str, float, bool, bool]] = []
     if brand:
-        items.append(("brand", brand, 1.0, _field_bold(options, "brand")))
+        items.append(("brand", brand, 1.0, _field_bold(options, "brand"), _field_italic(options, "brand")))
     if options.get("show_camera"):
         camera = _override_or_exif(options.get("camera_text"), md.camera)
         if camera:
             items.append(
-                ("camera", camera, _field_scale(options, "camera_scale"), _field_bold(options, "camera"))
+                (
+                    "camera",
+                    camera,
+                    _field_scale(options, "camera_scale"),
+                    _field_bold(options, "camera"),
+                    _field_italic(options, "camera"),
+                )
             )
     if options.get("show_lens"):
         lens = _override_or_exif(options.get("lens_text"), md.lens)
         if lens:
             items.append(
-                ("lens", lens, _field_scale(options, "lens_scale"), _field_bold(options, "lens"))
+                (
+                    "lens",
+                    lens,
+                    _field_scale(options, "lens_scale"),
+                    _field_bold(options, "lens"),
+                    _field_italic(options, "lens"),
+                )
             )
     if options.get("show_exif"):
         custom = str(options.get("exif_text", "") or "").strip()
         exposure = custom if custom else format_exposure_line(md)
         if exposure:
             items.append(
-                ("exif", exposure, _field_scale(options, "exif_scale"), _field_bold(options, "exif"))
+                (
+                    "exif",
+                    exposure,
+                    _field_scale(options, "exif_scale"),
+                    _field_bold(options, "exif"),
+                    _field_italic(options, "exif"),
+                )
             )
     if options.get("show_date"):
         date = _override_or_exif(options.get("date_text"), md.date)
         if date:
             items.append(
-                ("date", date, _field_scale(options, "date_scale"), _field_bold(options, "date"))
+                (
+                    "date",
+                    date,
+                    _field_scale(options, "date_scale"),
+                    _field_bold(options, "date"),
+                    _field_italic(options, "date"),
+                )
             )
     if options.get("show_gps"):
         gps = _override_or_exif(options.get("gps_text"), md.gps)
         if gps:
             items.append(
-                ("gps", gps, _field_scale(options, "gps_scale"), _field_bold(options, "gps"))
+                (
+                    "gps",
+                    gps,
+                    _field_scale(options, "gps_scale"),
+                    _field_bold(options, "gps"),
+                    _field_italic(options, "gps"),
+                )
             )
     if caption:
-        items.append(("caption", caption, 1.0, _field_bold(options, "caption")))
+        items.append(
+            ("caption", caption, 1.0, _field_bold(options, "caption"), _field_italic(options, "caption"))
+        )
     return items
 
 
@@ -763,28 +1311,34 @@ def render_custom_freeform_layers(
     pad = 0
     photo_origin = (0, 0)
     out_w, out_h = w, h
-    if base_style == "卡片相框":
-        pad = max(22, int(ref * 0.052))
-        footer_h = max(40, int(ref * 0.08))
-        out_w = w + 2 * pad
-        out_h = h + 2 * pad + footer_h
+    if base_style in ("卡片相框", "胶片边框"):
+        film = base_style == "胶片边框"
+        base_pad = max(16, int(ref * 0.036)) if film else max(22, int(ref * 0.052))
+        base_footer = max(40, int(ref * 0.08))
+        pad_x, pad_top, footer_h, pad_bottom, pad_right = _frame_box(base_pad, base_footer, options)
+        out_w = w + pad_x + pad_right
+        out_h = h + pad_top + footer_h + pad_bottom
+        frame = max(pad_x, pad_right, pad_top, pad_bottom)
         bg = theme["outer"]
         if frosted:
-            canvas = _frosted_frame(base, (out_w, out_h), radius=max(16.0, pad * 1.4))
+            canvas = _frosted_frame(base, (out_w, out_h), radius=max(16.0, frame * 1.4))
         else:
             canvas = Image.new("RGB", (out_w, out_h), bg)
-        shadow = Image.new("RGBA", (out_w, out_h), (0, 0, 0, 0))
-        sd = ImageDraw.Draw(shadow)
-        sd.rounded_rectangle(
-            (pad + 2, pad + 7, pad + w + 2, pad + h + 7),
-            radius=max(12, int(ref * 0.018)),
-            fill=(16, 28, 45, 70),
-        )
-        shadow = shadow.filter(ImageFilter.GaussianBlur(max(6, int(pad * 0.22))))
-        canvas = Image.alpha_composite(canvas.convert("RGBA"), shadow).convert("RGB")
-        mask = _rounded_mask((w, h), max(12, int(ref * 0.018)))
-        canvas.paste(base, (pad, pad), mask)
-        photo_origin = (pad, pad)
+        if film:
+            canvas.paste(base, (pad_x, pad_top))
+        else:
+            radius = _card_radius(options, ref)
+            canvas = _paste_card_shadow(
+                canvas,
+                (out_w, out_h),
+                (pad_x + 2, pad_top + 7, pad_x + w + 2, pad_top + h + 7),
+                radius,
+                options,
+                frame,
+            )
+            mask = _rounded_mask((w, h), radius)
+            canvas.paste(base, (pad_x, pad_top), mask)
+        photo_origin = (pad_x, pad_top)
         use_outline = False
         text_primary = (*theme["text"], 255) if len(theme["text"]) == 3 else theme["text"]
         text_muted = (*theme["muted"], 255) if len(theme["muted"]) == 3 else theme["muted"]
@@ -823,11 +1377,7 @@ def render_custom_freeform_layers(
     probe_draw = ImageDraw.Draw(probe)
 
     if logo is not None and options.get("show_logo", True) is not False:
-        thumb = logo.copy().convert("RGBA")
-        max_h = max(28, int(ref * 0.08 * scale_setting))
-        if thumb.height > max_h:
-            ratio = max_h / thumb.height
-            thumb = thumb.resize((max(1, int(thumb.width * ratio)), max_h), Image.Resampling.LANCZOS)
+        thumb = _fit_logo(logo, max(28, int(ref * 0.08 * scale_setting)) * _logo_scale(options)).convert("RGBA")
         nx, ny = _resolve_field_xy("logo", positions, defaults)
         cx, cy = _to_canvas(nx, ny)
         lx = int(round(cx - thumb.width / 2))
@@ -844,7 +1394,7 @@ def render_custom_freeform_layers(
         )
         _append_hit(hits, "logo", "", float(lx), float(ly), float(thumb.width), float(thumb.height))
 
-    for key, text, scale, bold in _freeform_field_items(md, options, brand, caption):
+    for key, text, scale, bold, italic in _freeform_field_items(md, options, brand, caption):
         preferred = max(12, int(ref * (0.036 if bold else 0.026) * scale_setting * scale))
         font = _fit_font(
             probe_draw,
@@ -858,6 +1408,8 @@ def render_custom_freeform_layers(
         fill = text_primary if bold or key in ("brand", "camera") else text_muted
         fill = _apply_fill_opacity(fill, _field_opacity(options, key))
         spr = _make_text_sprite(text, font, fill, use_outline=use_outline)
+        if italic:
+            spr = _slant_image(spr)
         nx, ny = _resolve_field_xy(key, positions, defaults)
         cx, cy = _to_canvas(nx, ny)
         sx = int(round(cx - spr.width / 2))
@@ -928,8 +1480,8 @@ def _prepare_render_context(
         del original_exif
     w, h = base.size
     ref = min(w, h)
-    theme_name = str(options.get("theme", "浅色"))
-    theme = _color_theme(theme_name)
+    theme_name = str(options.get("theme", "白色"))
+    theme = _color_theme(theme_name, options.get("bg_color", ""))
     frosted = _is_frosted_theme(theme_name)
     style = effective_style(options)
     scale_setting = max(0.65, min(1.6, float(options.get("scale", 1.0))))
@@ -948,6 +1500,7 @@ def _prepare_render_context(
                 sep_before=sep,
                 font_family=_field_font(options, "caption_font"),
                 bold=_field_bold(options, "caption"),
+                italic=_field_italic(options, "caption"),
                 opacity=_field_opacity(options, "caption"),
             )
         ]
@@ -955,9 +1508,26 @@ def _prepare_render_context(
     if not line_groups:
         line_groups = [[TextSegment("EXIF 参数暂缺，可添加自定义说明", 1.0)]]
     logo_path = str(options.get("logo_path", "") or "")
-    if options.get("show_logo", True) is False:
-        logo_path = ""
-    logo = _load_logo(logo_path, (max(52, int(ref * 0.247)), max(36, int(ref * 0.0715))))
+    show_logo = options.get("show_logo", True) is not False
+    logo_scale = _logo_scale(options)
+    logo_box = (max(52, int(ref * 0.247)), max(36, int(ref * 0.0715)))
+    logo = None
+    if show_logo:
+        logo = _load_logo(
+            logo_path, (int(logo_box[0] * logo_scale), int(logo_box[1] * logo_scale))
+        )
+        mark = str(options.get("logo_mark", "") or "")
+        if logo is None and mark == "nikon":
+            logo = _load_logo(
+                str(resource_dir() / "Nikon.webp"),
+                (int(logo_box[0] * logo_scale), int(logo_box[1] * logo_scale)),
+            )
+        elif logo is None and mark:
+            light = frosted or style in ("纯文字中下", "极简叠加")
+            color = (255, 255, 255) if light else theme["text"]
+            logo = _logo_badge(mark, int(logo_box[1] * logo_scale), color)
+        if logo is not None:
+            logo = _with_opacity(logo, _logo_opacity(options))
     return {
         "base": base.convert("RGB"),
         "w": w,
@@ -999,9 +1569,7 @@ def render_watermark_layers(
             ctx["scale_setting"],
             ctx["ref"],
         )
-    composite, hits = render_watermark_with_hits(
-        source_path, options, base_image=ctx["base"], metadata=ctx["md"]
-    )
+    composite, hits = _render_prepared(ctx, options)
     return {"composite": composite, "base": composite.copy(), "sprites": [], "hits": hits}
 
 
@@ -1014,9 +1582,122 @@ def render_watermark_with_hits(
 ) -> tuple[Image.Image, list[dict[str, Any]]]:
     """Render watermark and return clickable text regions in image coordinates.
 
-    base_image / metadata 供预览路径复用已解码图与缓存 EXIF；导出仍走默认全尺寸打开。
+    base_image / metadata 供预览和导出复用已解码图，避免再打开原图。
     """
     ctx = _prepare_render_context(source_path, options, base_image=base_image, metadata=metadata)
+    return _render_prepared(ctx, options)
+
+
+def _render_film(
+    ctx: dict[str, Any],
+    options: dict[str, Any],
+    hits: list[dict[str, Any]],
+    logo_scale: float,
+    show_divider: bool,
+) -> tuple[Image.Image, list[dict[str, Any]]]:
+    """胶片边框：四边等宽留边，底部一行居中排 Logo/署名与参数。"""
+    base = ctx["base"]
+    w, h = ctx["w"], ctx["h"]
+    ref = ctx["ref"]
+    theme = ctx["theme"]
+    scale_setting = ctx["scale_setting"]
+    shift_x, shift_y = ctx["shift_x"], ctx["shift_y"]
+    brand = ctx["brand"]
+    logo = ctx["logo"]
+    line_groups = ctx["line_groups"][:2]
+    brand_font = _field_font(options, "brand_font")
+    brand_bold = _field_bold(options, "brand")
+    brand_italic = _field_italic(options, "brand")
+    brand_opacity = _field_opacity(options, "brand")
+
+    base_pad = max(16, int(ref * 0.036))
+    base_footer = max(72, int(ref * 0.12 * scale_setting))
+    pad_left, pad_top, footer_h, pad_bottom, pad_right = _frame_box(base_pad, base_footer, options)
+    out_w = w + pad_left + pad_right
+    out_h = h + pad_top + footer_h + pad_bottom
+    if ctx["frosted"]:
+        frame = max(pad_left, pad_right, pad_top, pad_bottom)
+        canvas = _frosted_frame(base, (out_w, out_h), radius=max(16.0, frame * 1.4))
+    else:
+        canvas = Image.new("RGB", (out_w, out_h), theme["outer"])
+    canvas.paste(base, (pad_left, pad_top))
+    d = ImageDraw.Draw(canvas)
+
+    footer_top = pad_top + h
+    mid_y = footer_top + footer_h / 2 + shift_y
+    center_x = pad_left + w / 2 + shift_x
+    gap = max(12, int(ref * 0.02))
+
+    thumb = _fit_logo(logo, int(footer_h * 0.5) * logo_scale) if logo is not None else None
+    show_brand = bool(brand) and (thumb is None or bool(options.get("show_brand_text", False)))
+    fbrand = None
+    brand_box = (0, 0, 0, 0)
+    if show_brand:
+        fbrand = _fit_font(
+            d, brand, max(60, int(out_w * 0.3)), int(footer_h * 0.24), brand_bold, brand_bold, font_family=brand_font
+        )
+        brand_box = d.textbbox((0, 0), brand, font=fbrand)
+    brand_w = brand_box[2] - brand_box[0]
+    if show_brand and brand_italic and fbrand is not None:
+        brand_w += _italic_extra(fbrand)
+    left_w = 0
+    if thumb is not None:
+        left_w += thumb.width
+    if show_brand:
+        left_w += brand_w + (gap if thumb is not None else 0)
+
+    prefs = [max(10, int(footer_h * (0.2 if idx == 0 else 0.15))) for idx in range(len(line_groups))]
+    max_line_w = max(60, int(out_w * 0.86) - left_w - gap * 2)
+    right_w = max(
+        (_segments_width(d, segs, max_line_w, pref) for segs, pref in zip(line_groups, prefs)),
+        default=0,
+    )
+    divider = show_divider and left_w > 0
+    middle = (gap * 2 if divider else gap) if left_w > 0 and right_w > 0 else 0
+    x = center_x - (left_w + middle + right_w) / 2
+
+    if thumb is not None:
+        canvas.paste(thumb, (int(round(x)), int(round(mid_y - thumb.height / 2))), thumb)
+        _append_hit(hits, "logo", "", x, mid_y - thumb.height / 2, float(thumb.width), float(thumb.height))
+        x += thumb.width + (gap if show_brand else 0)
+    if show_brand and fbrand is not None:
+        bx = x - brand_box[0]
+        by = mid_y - (brand_box[1] + brand_box[3]) / 2
+        _blit_text(canvas, d, (bx, by), brand, fbrand, _apply_fill_opacity(theme["text"], brand_opacity), italic=brand_italic)
+        hit = d.textbbox((bx, by), brand, font=fbrand)
+        _append_hit(hits, "brand", brand, hit[0], hit[1], hit[2] - hit[0], hit[3] - hit[1])
+        x += brand_w
+    if middle:
+        if divider:
+            x += gap
+            line_color = tuple((m + b) // 2 for m, b in zip(theme["muted"], theme["outer"]))
+            x = _draw_divider(d, x, int(footer_top + shift_y), footer_h, ref, line_color)
+        x += gap
+
+    line_hs = [int(pref * 1.3) for pref in prefs]
+    y = mid_y - sum(line_hs) / 2
+    for idx, (segs, pref) in enumerate(zip(line_groups, prefs)):
+        _draw_segments(
+            d,
+            segs,
+            int(round(y)),
+            max_line_w,
+            pref,
+            theme["text"] if idx == 0 else theme["muted"],
+            idx == 0,
+            align="left",
+            anchor_x=int(round(x)),
+            hits=hits,
+        )
+        y += line_hs[idx]
+    _append_hit(hits, "watermark_bar", "", 0.0, float(footer_top), float(out_w), float(footer_h))
+    return canvas, hits
+
+
+def _render_prepared(
+    ctx: dict[str, Any],
+    options: dict[str, Any],
+) -> tuple[Image.Image, list[dict[str, Any]]]:
     base = ctx["base"]
     w, h = ctx["w"], ctx["h"]
     ref = ctx["ref"]
@@ -1033,7 +1714,10 @@ def render_watermark_with_hits(
     hits: list[dict[str, Any]] = []
     brand_font = _field_font(options, "brand_font")
     brand_bold = _field_bold(options, "brand")
+    brand_italic = _field_italic(options, "brand")
     brand_opacity = _field_opacity(options, "brand")
+    logo_scale = _logo_scale(options)
+    show_divider = bool(options.get("show_divider", False))
 
     if is_custom_style(options):
         return _render_custom_freeform(
@@ -1063,11 +1747,7 @@ def render_watermark_with_hits(
         block_left = float(w)
         block_right = 0.0
         if logo is not None:
-            thumb = logo.copy()
-            max_h = max(28, int(ref * 0.08 * scale_setting))
-            if thumb.height > max_h:
-                ratio = max_h / thumb.height
-                thumb = thumb.resize((max(1, int(thumb.width * ratio)), max_h), Image.Resampling.LANCZOS)
+            thumb = _fit_logo(logo, max(28, int(ref * 0.08 * scale_setting)) * logo_scale)
             lx = center_x - thumb.width // 2
             overlay.paste(thumb, (lx, cy), thumb)
             block_left = min(block_left, float(lx))
@@ -1081,7 +1761,7 @@ def render_watermark_with_hits(
                 bb = d.textbbox((0, 0), brand, font=fbrand)
                 bx = center_x - (bb[2] - bb[0]) / 2
                 brand_fill = _apply_fill_opacity(text_primary, brand_opacity)
-                _blit_text(overlay, d, (bx, cy), brand, fbrand, brand_fill, outline=True)
+                _blit_text(overlay, d, (bx, cy), brand, fbrand, brand_fill, outline=True, italic=brand_italic)
                 hit = d.textbbox((bx, cy), brand, font=fbrand)
                 _append_hit(hits, "brand", brand, hit[0], hit[1], hit[2] - hit[0], hit[3] - hit[1])
                 block_left = min(block_left, float(hit[0]))
@@ -1095,7 +1775,7 @@ def render_watermark_with_hits(
             bb = d.textbbox((0, 0), brand, font=fbrand)
             bx = center_x - (bb[2] - bb[0]) / 2
             brand_fill = _apply_fill_opacity(text_primary, brand_opacity)
-            _blit_text(overlay, d, (bx, cy), brand, fbrand, brand_fill, outline=True)
+            _blit_text(overlay, d, (bx, cy), brand, fbrand, brand_fill, outline=True, italic=brand_italic)
             hit = d.textbbox((bx, cy), brand, font=fbrand)
             _append_hit(hits, "brand", brand, hit[0], hit[1], hit[2] - hit[0], hit[3] - hit[1])
             block_left = min(block_left, float(hit[0]))
@@ -1141,7 +1821,19 @@ def render_watermark_with_hits(
     if style == "极简叠加":
         rgba = base.convert("RGBA")
         # 底栏高度随「水印大小」与短边变化，相机/镜头等字号才能一起变大。
-        band_h = max(96, int(ref * 0.1196 * scale_setting))
+        base_band = max(96, int(ref * 0.1196 * scale_setting))
+        base_margin = max(20, int(w * 0.033))
+        band_h, side_margin, right_margin = _bar_size(base_band, base_margin, options)
+        line_heights = [int(band_h * (0.31 if idx == 0 else 0.22)) for idx in range(len(line_groups))]
+        total_h = sum(line_heights) + max(0, len(line_groups) - 1) * 1
+        band_h, top_pad, bottom_pad = _bar_insets(band_h, total_h, options)
+        if band_h > h:
+            band_h = h
+            if _pads_are_default(options):
+                top_pad = max(3, (band_h - total_h) // 2)
+            else:
+                top_pad = min(top_pad, max(0, band_h - 1))
+        default_pads = _pads_are_default(options)
         band_top = max(0, min(h - band_h, h - band_h + shift_y))
         if frosted:
             try:
@@ -1155,19 +1847,21 @@ def render_watermark_with_hits(
         if not frosted:
             alpha = _bar_alpha(options, 172)
             d.rectangle((0, band_top, w, band_top + band_h), fill=(7, 12, 20, alpha))
-        margin = max(20, int(w * 0.033)) + shift_x
+        margin = side_margin + shift_x
         left_cap = int(w * 0.42)
         text_primary = (255, 255, 255, 255)
         text_muted = (211, 219, 230, 255)
         left_occupied = float(max(8, margin))
+        left_drawn = False
         if logo is not None:
-            thumb = logo.copy()
-            max_h = int(band_h * 0.64)
-            if thumb.height > max_h:
-                ratio = max_h / thumb.height
-                thumb = thumb.resize((max(1, int(thumb.width * ratio)), max_h), Image.Resampling.LANCZOS)
+            left_drawn = True
+            thumb = _fit_logo(logo, int(band_h * 0.64) * logo_scale)
             lx = max(0, margin)
-            overlay.paste(thumb, (lx, band_top + (band_h - thumb.height) // 2), thumb)
+            overlay.paste(
+                thumb,
+                (lx, _inner_item_y(band_top, band_h, thumb.height, top_pad, bottom_pad, default_pads=default_pads)),
+                thumb,
+            )
             left_occupied = float(lx + thumb.width)
             if brand and options.get("show_brand_text", False):
                 logo_gap = max(18, int(w * 0.012))
@@ -1181,30 +1875,33 @@ def render_watermark_with_hits(
                     font_family=brand_font,
                 )
                 bx = lx + thumb.width + logo_gap
-                by = band_top + (band_h - small.size) // 2
+                by = _inner_item_y(band_top, band_h, small.size, top_pad, bottom_pad, default_pads=default_pads)
                 brand_fill = _apply_fill_opacity(text_primary, brand_opacity)
-                _blit_text(overlay, d, (bx, by), brand, small, brand_fill)
+                _blit_text(overlay, d, (bx, by), brand, small, brand_fill, italic=brand_italic)
                 bb = d.textbbox((bx, by), brand, font=small)
                 _append_hit(hits, "brand", brand, bb[0], bb[1], bb[2] - bb[0], bb[3] - bb[1])
                 left_occupied = float(bb[2])
         elif brand:
+            left_drawn = True
             fbrand = _fit_font(
                 d, brand, left_cap, int(band_h * 0.54), brand_bold, brand_bold, font_family=brand_font
             )
             bx = float(max(8, margin))
-            by = float(band_top + int(band_h * 0.14))
+            by = float(band_top + int(band_h * 0.14) if default_pads else band_top + top_pad)
             brand_fill = _apply_fill_opacity(text_primary, brand_opacity)
-            _blit_text(overlay, d, (bx, by), brand, fbrand, brand_fill)
+            _blit_text(overlay, d, (bx, by), brand, fbrand, brand_fill, italic=brand_italic)
             bb = d.textbbox((bx, by), brand, font=fbrand)
             _append_hit(hits, "brand", brand, bb[0], bb[1], bb[2] - bb[0], bb[3] - bb[1])
             left_occupied = float(bb[2])
 
-        right_x = w - max(20, int(w * 0.033)) + shift_x
+        right_x = w - right_margin + shift_x
         gap = max(16, int(w * 0.02))
+        if show_divider and left_drawn:
+            left_occupied = _draw_divider(
+                d, left_occupied + gap, band_top, band_h, ref, (255, 255, 255, 120)
+            )
         max_right = max(48, int(right_x - left_occupied - gap))
-        line_heights = [int(band_h * (0.31 if idx == 0 else 0.22)) for idx in range(len(line_groups))]
-        total_h = sum(line_heights) + max(0, len(line_groups) - 1) * 1
-        y = band_top + max(3, (band_h - total_h) // 2)
+        y = band_top + top_pad
         for idx, segments in enumerate(line_groups[:3]):
             pref = int(band_h * (0.32 if idx == 0 else 0.21))
             _draw_segments(
@@ -1225,31 +1922,36 @@ def render_watermark_with_hits(
         return Image.alpha_composite(rgba, overlay).convert("RGB"), hits
 
     if style == "卡片相框":
-        pad = max(22, int(min(w, h) * 0.052))
+        base_pad = max(22, int(min(w, h) * 0.052))
         # 页脚按原比例再收一截（约减少 1/5），避免底部留白过多。
-        footer_h = max(94, int(min(w, h) * 0.1664 * scale_setting))
+        base_footer = max(94, int(min(w, h) * 0.1664 * scale_setting))
         # Logo + 署名纵向叠放时加高页脚，避免挤在一起。
         if logo is not None and brand:
-            footer_h = max(footer_h, int(footer_h * 1.28))
-        out_w = w + 2 * pad
-        out_h = h + 2 * pad + footer_h
+            base_footer = max(base_footer, int(base_footer * 1.28))
+        pad_x, pad_top, footer_h, pad_bottom, pad_right = _frame_box(base_pad, base_footer, options)
+        out_w = w + pad_x + pad_right
+        out_h = h + pad_top + footer_h + pad_bottom
+        frame = max(pad_x, pad_right, pad_top, pad_bottom)
         bg = theme["outer"]
         if frosted:
-            canvas = _frosted_frame(base, (out_w, out_h), radius=max(16.0, pad * 1.4))
+            canvas = _frosted_frame(base, (out_w, out_h), radius=max(16.0, frame * 1.4))
         else:
             canvas = Image.new("RGB", (out_w, out_h), bg)
-        shadow = Image.new("RGBA", (out_w, out_h), (0, 0, 0, 0))
-        sd = ImageDraw.Draw(shadow)
-        sd.rounded_rectangle((pad + 2, pad + 7, pad + w + 2, pad + h + 7),
-                             radius=max(12, int(min(w, h) * .018)), fill=(16, 28, 45, 70))
-        shadow = shadow.filter(ImageFilter.GaussianBlur(max(6, int(pad * .22))))
-        canvas = Image.alpha_composite(canvas.convert("RGBA"), shadow).convert("RGB")
-        mask = _rounded_mask((w, h), max(12, int(min(w, h) * .018)))
-        canvas.paste(base, (pad, pad), mask)
+        radius = _card_radius(options, ref)
+        canvas = _paste_card_shadow(
+            canvas,
+            (out_w, out_h),
+            (pad_x + 2, pad_top + 7, pad_x + w + 2, pad_top + h + 7),
+            radius,
+            options,
+            frame,
+        )
+        mask = _rounded_mask((w, h), radius)
+        canvas.paste(base, (pad_x, pad_top), mask)
         d = ImageDraw.Draw(canvas)
-        footer_top = pad + h
+        footer_top = pad_top + h
         cy = footer_top + max(14, int(footer_h * .10)) + shift_y
-        center_x = out_w // 2 + shift_x
+        center_x = pad_x + w // 2 + shift_x
         if logo is not None:
             lx = center_x - logo.width // 2
             canvas.paste(logo, (lx, cy), logo)
@@ -1259,12 +1961,12 @@ def render_watermark_with_hits(
         if brand:
             brand_size = int(min(w, h) * (.0364 if logo is not None else .0546) * scale_setting)
             fbrand = _fit_font(
-                d, brand, out_w - pad * 2, brand_size, brand_bold, brand_bold, font_family=brand_font
+                d, brand, out_w - pad_x * 2, brand_size, brand_bold, brand_bold, font_family=brand_font
             )
             bb = d.textbbox((0, 0), brand, font=fbrand)
             bx = center_x - (bb[2] - bb[0]) / 2
             brand_fill = _apply_fill_opacity(theme["text"], brand_opacity)
-            _blit_text(canvas, d, (bx, cy), brand, fbrand, brand_fill)
+            _blit_text(canvas, d, (bx, cy), brand, fbrand, brand_fill, italic=brand_italic)
             hit = d.textbbox((bx, cy), brand, font=fbrand)
             _append_hit(hits, "brand", brand, hit[0], hit[1], hit[2] - hit[0], hit[3] - hit[1])
             cy += int(fbrand.size * 1.18)
@@ -1274,7 +1976,7 @@ def render_watermark_with_hits(
                 d,
                 segments,
                 cy,
-                out_w - pad * 2,
+                out_w - pad_x * 2,
                 preferred,
                 theme["text"] if idx == 0 else theme["muted"],
                 idx == 0,
@@ -1286,7 +1988,16 @@ def render_watermark_with_hits(
         _append_hit(hits, "watermark_bar", "", 0.0, float(footer_top), float(out_w), float(footer_h))
         return canvas, hits
 
-    bar_h = max(96, int(ref * .1196 * scale_setting))
+    if style == "胶片边框":
+        return _render_film(ctx, options, hits, logo_scale, show_divider)
+
+    base_bar = max(96, int(ref * .1196 * scale_setting))
+    base_margin = max(20, int(w * .033))
+    bar_h, side_margin, right_margin = _bar_size(base_bar, base_margin, options)
+    line_heights = [int(bar_h * (0.31 if idx == 0 else 0.22)) for idx in range(len(line_groups))]
+    total_h = sum(line_heights) + max(0, len(line_groups) - 1) * 1
+    bar_h, top_pad, bottom_pad = _bar_insets(bar_h, total_h, options)
+    default_pads = _pads_are_default(options)
     if frosted:
         canvas = Image.new("RGB", (w, h + bar_h))
         canvas.paste(base, (0, 0))
@@ -1295,17 +2006,18 @@ def render_watermark_with_hits(
         canvas = Image.new("RGB", (w, h + bar_h), theme["bar"])
         canvas.paste(base, (0, 0))
     d = ImageDraw.Draw(canvas)
-    margin = max(20, int(w * .033)) + shift_x
+    margin = side_margin + shift_x
     left_cap = int(w * .42)
     left_occupied = float(max(8, margin))
+    left_drawn = logo is not None or bool(brand)
     if logo is not None:
-        thumb = logo.copy()
-        max_h = int(bar_h * .64)
-        if thumb.height > max_h:
-            ratio = max_h / thumb.height
-            thumb = thumb.resize((max(1, int(thumb.width * ratio)), max_h), Image.Resampling.LANCZOS)
+        thumb = _fit_logo(logo, int(bar_h * .64) * logo_scale)
         lx = max(0, margin)
-        canvas.paste(thumb, (lx, h + (bar_h - thumb.height) // 2), thumb)
+        canvas.paste(
+            thumb,
+            (lx, _inner_item_y(h, bar_h, thumb.height, top_pad, bottom_pad, default_pads=default_pads)),
+            thumb,
+        )
         left_occupied = float(lx + thumb.width)
         if brand and options.get("show_brand_text", False):
             logo_gap = max(18, int(w * 0.012))
@@ -1319,9 +2031,9 @@ def render_watermark_with_hits(
                 font_family=brand_font,
             )
             bx = lx + thumb.width + logo_gap
-            by = h + (bar_h - small.size) // 2
+            by = _inner_item_y(h, bar_h, small.size, top_pad, bottom_pad, default_pads=default_pads)
             brand_fill = _apply_fill_opacity(theme["text"], brand_opacity)
-            _blit_text(canvas, d, (bx, by), brand, small, brand_fill)
+            _blit_text(canvas, d, (bx, by), brand, small, brand_fill, italic=brand_italic)
             hit = d.textbbox((bx, by), brand, font=small)
             _append_hit(hits, "brand", brand, hit[0], hit[1], hit[2] - hit[0], hit[3] - hit[1])
             left_occupied = float(hit[2])
@@ -1330,19 +2042,20 @@ def render_watermark_with_hits(
             d, brand, left_cap, int(bar_h * .54), brand_bold, brand_bold, font_family=brand_font
         )
         bx = float(max(8, margin))
-        by = float(h + int(bar_h * .14))
+        by = float(h + int(bar_h * .14) if default_pads else h + top_pad)
         brand_fill = _apply_fill_opacity(theme["text"], brand_opacity)
-        _blit_text(canvas, d, (bx, by), brand, fbrand, brand_fill)
+        _blit_text(canvas, d, (bx, by), brand, fbrand, brand_fill, italic=brand_italic)
         hit = d.textbbox((bx, by), brand, font=fbrand)
         _append_hit(hits, "brand", brand, hit[0], hit[1], hit[2] - hit[0], hit[3] - hit[1])
         left_occupied = float(hit[2])
 
-    right_x = w - max(20, int(w * .033)) + shift_x
+    right_x = w - right_margin + shift_x
     gap = max(16, int(w * 0.02))
+    if show_divider and left_drawn:
+        line_color = tuple((m + b) // 2 for m, b in zip(theme["muted"], theme["bar"]))
+        left_occupied = _draw_divider(d, left_occupied + gap, h, bar_h, ref, line_color)
     max_right = max(48, int(right_x - left_occupied - gap))
-    line_heights = [int(bar_h * (0.31 if idx == 0 else 0.22)) for idx in range(len(line_groups))]
-    total_h = sum(line_heights) + max(0, len(line_groups) - 1) * 1
-    y = h + max(3, (bar_h - total_h) // 2)
+    y = h + top_pad
     for idx, segments in enumerate(line_groups[:3]):
         pref = int(bar_h * (0.32 if idx == 0 else 0.21))
         _draw_segments(

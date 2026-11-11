@@ -26,8 +26,8 @@ def main() -> int:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
-    app.setApplicationName("Photo Watermark Studio")
-    app.setOrganizationName("PhotoWatermarkStudio")
+    app.setApplicationName("停下时光 Studio")
+    app.setOrganizationName("TingxiaStudio")
     app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 10))
     logo = app_logo_path()

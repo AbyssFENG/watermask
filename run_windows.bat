@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 cd /d "%~dp0"
 set "PY=D:\anaconda\envs\watermask\python.exe"
 set "PYW=D:\anaconda\envs\watermask\pythonw.exe"

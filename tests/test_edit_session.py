@@ -86,6 +86,19 @@ class EditSessionTests(unittest.TestCase):
         self.assertTrue(merged["exif_bold"])
         self.assertTrue(merged["lens_bold"])  # 默认加粗
 
+    def test_field_italic_is_per_field(self) -> None:
+        store = EditSessionStore(self.path)
+        store.set_field(self.photo_a, "camera", "Cam", 1.0, italic=True)
+        store.set_field(self.photo_a, "exif", "ISO 100", 1.0, italic=False)
+        cam = store.get_field(self.photo_a, "camera")
+        exif = store.get_field(self.photo_a, "exif")
+        self.assertTrue(cam["italic"])
+        self.assertFalse(exif["italic"])
+        merged = store.merge_into({}, self.photo_a)
+        self.assertTrue(merged["camera_italic"])
+        self.assertFalse(merged["exif_italic"])
+        self.assertFalse(merged["lens_italic"])
+
     def test_field_opacity_is_per_field(self) -> None:
         store = EditSessionStore(self.path)
         store.set_field(self.photo_a, "camera", "Cam", 1.0, opacity=0.5)

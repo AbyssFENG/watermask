@@ -5,27 +5,30 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QKeySequence
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFileDialog,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QSizePolicy,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from photo_watermark_studio.controllers.photo_controller import PhotoController
+from photo_watermark_studio.core import settings_store, template_store
 from photo_watermark_studio.paths import app_logo_path
 from photo_watermark_studio.widgets.photo_list import PhotoListPanel
 from photo_watermark_studio.widgets.preview_widget import PreviewPanel
 from photo_watermark_studio.widgets.settings_panel import SettingsPanel
+from photo_watermark_studio.widgets.studio_sidebar import StudioSidebar
 
-APP_NAME = "光影水印 · Photo Watermark Studio"
+APP_NAME = "停下时光 · Studio"
 
 
 class MainWindow(QMainWindow):
@@ -44,37 +47,39 @@ class MainWindow(QMainWindow):
 
         self.controller = PhotoController(settings_path)
         self.photo_list = PhotoListPanel()
+        self.photo_list.set_rail_mode(True)
         self.preview = PreviewPanel()
         self.settings = SettingsPanel()
+        self.settings.setMaximumWidth(350)
+        self.sidebar = StudioSidebar()
+        if settings_path is not None:
+            self.settings.set_templates_path(Path(settings_path).with_name("templates.json"))
         self.settings.set_state(self.controller.snapshot())
         self._output_dir_full = self.settings.state()["output_dir"]
 
         root = QWidget()
         root.setObjectName("AppRoot")
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(16, 14, 16, 4)
         outer.setSpacing(0)
-        outer.addWidget(self._build_header())
-
-        mid = QWidget()
-        mid_layout = QVBoxLayout(mid)
-        mid_layout.setContentsMargins(16, 12, 16, 8)
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.setObjectName("MainSplitter")
-        self.splitter.setChildrenCollapsible(True)
-        self.splitter.setHandleWidth(10)
-        self.splitter.addWidget(self.photo_list)
-        self.splitter.addWidget(self.preview)
-        self.splitter.addWidget(self.settings)
-        self.splitter.setStretchFactor(0, 1)
-        self.splitter.setStretchFactor(1, 4)
-        self.splitter.setStretchFactor(2, 2)
-        self.splitter.setSizes([260, 820, 320])
-        mid_layout.addWidget(self.splitter)
-        outer.addWidget(mid, 1)
+        self.topbar = self._build_header()
+        outer.addWidget(self.topbar)
+        outer.addSpacing(12)
+        outer.addWidget(self._build_studio(), 1)
+        outer.addSpacing(6)
         outer.addWidget(self._build_status_bar())
         self.setCentralWidget(root)
         self._build_menus()
+        self.menuBar().setVisible(False)
+        for widget in (
+            self.topbar,
+            self.sidebar,
+            self.workspace_head,
+            self.preview,
+            self.photo_list,
+            self.settings,
+        ):
+            self._add_shadow(widget)
 
         self._connect()
         self.status_label.setText("添加照片开始制作水印。原图不会被修改。")
@@ -82,52 +87,134 @@ class MainWindow(QMainWindow):
         self.controller.set_preview_size(*self.preview.viewport_size())
         self.controller._emit_summary()
         self.preview.set_layout_drag_enabled(str(self.controller.document.get("style", "")) == "自定义")
+        self.sidebar.set_style(str(self.controller.document.get("style", "")))
+        self._refresh_recent_templates()
         if self.controller._had_session:
             self.status_label.setText("已恢复上次未完成的单张调整。")
 
     def _build_header(self) -> QWidget:
         header = QWidget()
-        header.setObjectName("Header")
+        header.setObjectName("TopBar")
         header.setFixedHeight(56)
         layout = QHBoxLayout(header)
         layout.setContentsMargins(22, 0, 24, 0)
         layout.setSpacing(10)
 
-        mark = QLabel("光")
+        mark = QLabel("✦")
         mark.setObjectName("LogoMark")
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         mark.setFixedSize(34, 34)
-        logo = app_logo_path()
-        if logo.is_file():
-            pix = QPixmap(str(logo))
-            if not pix.isNull():
-                mark.setPixmap(
-                    pix.scaled(
-                        34,
-                        34,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                )
-                mark.setText("")
 
-        title = QLabel("光影水印")
+        title = QLabel("停下时光")
         title.setObjectName("AppTitle")
-        subtitle = QLabel("Photo Watermark Studio  ·  本地照片元数据水印工具")
+        subtitle = QLabel("PHOTO STUDIO")
         subtitle.setObjectName("AppSubtitle")
         for label in (title, subtitle):
             label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        titles = QVBoxLayout()
+        titles = QHBoxLayout()
         titles.setContentsMargins(0, 0, 0, 0)
-        titles.setSpacing(0)
+        titles.setSpacing(8)
         titles.addWidget(title)
         titles.addWidget(subtitle)
 
         layout.addWidget(mark)
         layout.addLayout(titles)
         layout.setAlignment(titles, Qt.AlignmentFlag.AlignVCenter)
+        layout.addSpacing(28)
+        self.nav_edit = QPushButton("编辑工作台")
+        self.nav_templates = QPushButton("我的模板")
+        self.nav_batch = QPushButton("批量处理")
+        for button in (self.nav_edit, self.nav_templates, self.nav_batch):
+            button.setObjectName("TopNav")
+            button.setCheckable(True)
+            layout.addWidget(button)
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        for button in (self.nav_edit, self.nav_templates, self.nav_batch):
+            self.nav_group.addButton(button)
+        self.nav_edit.setChecked(True)
         layout.addStretch(1)
+        self.saved_label = QLabel("●  所有修改已保存")
+        self.saved_label.setObjectName("SavedState")
+        self.save_template_button = QPushButton("保存为模板")
+        self.save_template_button.setObjectName("saveTemplateButton")
+        self.save_template_button.setProperty("role", "soft")
+        self.save_button = QPushButton("导出当前")
+        self.save_button.setObjectName("saveCurrentButton")
+        self.save_button.setProperty("role", "soft")
+        self.export_button = QPushButton("导出照片 ↗")
+        self.export_button.setObjectName("exportAllButton")
+        self.export_button.setProperty("role", "primary")
+        self.avatar_label = QLabel("TJ")
+        self.avatar_label.setObjectName("Avatar")
+        self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.avatar_label.setFixedSize(30, 30)
+        layout.addWidget(self.saved_label)
+        layout.addWidget(self.save_template_button)
+        layout.addWidget(self.save_button)
+        layout.addWidget(self.export_button)
+        layout.addWidget(self.avatar_label)
         return header
+
+    @staticmethod
+    def _add_shadow(widget: QWidget) -> None:
+        effect = QGraphicsDropShadowEffect(widget)
+        effect.setBlurRadius(34)
+        effect.setOffset(0, 10)
+        effect.setColor(QColor(41, 48, 75, 30))
+        widget.setGraphicsEffect(effect)
+
+    def _build_studio(self) -> QWidget:
+        studio = QWidget()
+        studio.setObjectName("StudioBody")
+        layout = QHBoxLayout(studio)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        center = QWidget()
+        center.setObjectName("CenterWorkspace")
+        center_layout = QVBoxLayout(center)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(8)
+
+        self.workspace_head = QWidget()
+        self.workspace_head.setObjectName("WorkspaceHead")
+        head = QHBoxLayout(self.workspace_head)
+        head.setContentsMargins(16, 7, 12, 7)
+        file_box = QVBoxLayout()
+        file_box.setContentsMargins(0, 0, 0, 0)
+        file_box.setSpacing(0)
+        self.file_title = QLabel("尚未选择照片")
+        self.file_title.setObjectName("FileTitle")
+        self.file_subtitle = QLabel("导入照片开始编辑")
+        self.file_subtitle.setObjectName("FileSubtitle")
+        file_box.addWidget(self.file_title)
+        file_box.addWidget(self.file_subtitle)
+        head.addLayout(file_box)
+        head.addStretch(1)
+        self.undo_button = QPushButton("↶")
+        self.undo_button.setObjectName("IconButton")
+        self.undo_button.setToolTip("撤销")
+        self.redo_button = QPushButton("↷")
+        self.redo_button.setObjectName("IconButton")
+        self.redo_button.setToolTip("重做")
+        self.fit_button = QPushButton("适应画布")
+        self.fit_button.setProperty("role", "soft")
+        self.add_photos_button = QPushButton("＋ 导入照片")
+        self.add_photos_button.setProperty("role", "soft")
+        head.addWidget(self.undo_button)
+        head.addWidget(self.redo_button)
+        head.addWidget(self.fit_button)
+        head.addWidget(self.add_photos_button)
+
+        center_layout.addWidget(self.workspace_head)
+        center_layout.addWidget(self.preview, 1)
+        center_layout.addWidget(self.photo_list)
+
+        layout.addWidget(self.sidebar)
+        layout.addWidget(center, 1)
+        layout.addWidget(self.settings)
+        return studio
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("文件")
@@ -162,10 +249,13 @@ class MainWindow(QMainWindow):
         self.act_redo.triggered.connect(self.controller.redo)
         act_reset = QAction("重置当前照片调整", self)
         act_reset.triggered.connect(lambda: self.controller.reset_photo_overrides())
+        act_reset_watermark = QAction("重置水印设置", self)
+        act_reset_watermark.triggered.connect(self._reset_watermark_settings)
         edit_menu.addAction(self.act_undo)
         edit_menu.addAction(self.act_redo)
         edit_menu.addSeparator()
         edit_menu.addAction(act_reset)
+        edit_menu.addAction(act_reset_watermark)
 
         view_menu = self.menuBar().addMenu("视图")
         act_fit = QAction("适应窗口", self)
@@ -185,9 +275,9 @@ class MainWindow(QMainWindow):
     def _build_status_bar(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName("StatusBar")
-        bar.setFixedHeight(64)
+        bar.setFixedHeight(22)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(24, 10, 16, 10)
+        layout.setContentsMargins(8, 0, 8, 0)
         layout.setSpacing(8)
 
         self.status_label = QLabel()
@@ -207,24 +297,12 @@ class MainWindow(QMainWindow):
         self.cancel_button.setProperty("role", "soft")
         self.cancel_button.setVisible(False)
 
-        self.save_button = QPushButton("导出当前图片")
-        self.save_button.setObjectName("saveCurrentButton")
-        self.save_button.setProperty("role", "soft")
-        self.save_button.setMinimumWidth(118)
-
-        self.export_button = QPushButton("批量导出水印")
-        self.export_button.setObjectName("exportAllButton")
-        self.export_button.setProperty("role", "primary")
-        self.export_button.setMinimumWidth(118)
-
         self.summary_label.setMinimumWidth(0)
         self.output_status.setMaximumWidth(220)
         layout.addWidget(self.status_label, 1)
         layout.addWidget(self.summary_label, 0)
         layout.addWidget(self.output_status, 0)
         layout.addWidget(self.cancel_button, 0)
-        layout.addWidget(self.save_button, 0)
-        layout.addWidget(self.export_button, 0)
         return bar
 
     def _connect(self) -> None:
@@ -239,12 +317,36 @@ class MainWindow(QMainWindow):
         self.preview.fieldChanged.connect(self._on_field_changed)
         self.preview.fontFamilyChanged.connect(self._on_font_family_changed)
         self.preview.fontBoldChanged.connect(self._on_font_bold_changed)
+        self.preview.fontItalicChanged.connect(self._on_font_italic_changed)
         self.preview.fontOpacityChanged.connect(self._on_font_opacity_changed)
         self.preview.fieldPositionChanged.connect(self._on_field_position)
         self.settings.optionsChanged.connect(self._on_settings)
         self.settings.chooseLogoRequested.connect(self._choose_logo)
         self.settings.clearLogoRequested.connect(lambda: self.settings.set_logo_path(""))
         self.settings.chooseOutputRequested.connect(self._choose_output)
+        self.settings.resetWatermarkRequested.connect(self._reset_watermark_settings)
+        self.settings.exportRequested.connect(self._export_all)
+        self.settings.templatesChanged.connect(self._refresh_recent_templates)
+        self.settings.photoFieldTextEdited.connect(self._on_panel_photo_field_edited)
+        self.settings.resetPhotoExifRequested.connect(lambda: self.controller.reset_photo_overrides())
+        self.sidebar.styleRequested.connect(self._select_style)
+        self.sidebar.photosRequested.connect(lambda: self._go_section("photos"))
+        self.sidebar.batchRequested.connect(lambda: self._go_section("batch"))
+        self.sidebar.assetsRequested.connect(lambda: self._go_section("assets"))
+        self.sidebar.allTemplatesRequested.connect(lambda: self._go_section("templates"))
+        self.sidebar.recentTemplateRequested.connect(self._apply_recent_template)
+        self.sidebar.helpRequested.connect(self._about)
+        self.nav_edit.clicked.connect(lambda: self._go_section("photos"))
+        self.nav_templates.clicked.connect(lambda: self._go_section("templates"))
+        self.nav_batch.clicked.connect(lambda: self._go_section("batch"))
+        self.preview.importRequested.connect(self._add_files)
+        self.photo_list.metaChanged.connect(self._on_photo_meta)
+        self.controller.saveStateChanged.connect(self._on_save_state)
+        self.add_photos_button.clicked.connect(self._add_files)
+        self.fit_button.clicked.connect(self.preview.fit_in_view)
+        self.undo_button.clicked.connect(self.controller.undo)
+        self.redo_button.clicked.connect(self.controller.redo)
+        self.save_template_button.clicked.connect(self.settings.save_as_template)
         self.save_button.clicked.connect(self._save_current)
         self.export_button.clicked.connect(self._export_all)
         self.cancel_button.clicked.connect(self.controller.cancel_export)
@@ -294,6 +396,7 @@ class MainWindow(QMainWindow):
         self._show_output_dir(str(state["output_dir"]))
         custom = str(state.get("style", "")) == "自定义"
         self.preview.set_layout_drag_enabled(custom)
+        self.sidebar.set_style(str(state.get("style", "")))
 
     def _on_files(self, paths: object) -> None:
         items = [str(path) for path in paths] if isinstance(paths, list) else []
@@ -303,6 +406,82 @@ class MainWindow(QMainWindow):
         self.photo_list.set_current_path(path)
         self.preview.set_photo_token(path)
         self.preview.hide_field_editor()
+        if path:
+            self.file_title.setText(Path(path).name)
+        else:
+            self.file_title.setText("尚未选择照片")
+        self._update_file_subtitle()
+        self._sync_photo_exif_panel()
+
+    def _sync_photo_exif_panel(self) -> None:
+        path = self.controller.current_path
+        if not path:
+            self.settings.set_photo_exif_overrides(None, has_photo=False)
+            return
+        overrides = {
+            key: str(self.controller.edit_session.get_field(path, key).get("text", "") or "")
+            for key in ("camera", "lens", "exif")
+        }
+        self.settings.set_photo_exif_overrides(overrides, has_photo=True)
+
+    def _on_panel_photo_field_edited(self, field: str, text: str) -> None:
+        if field not in ("camera", "lens", "exif") or not self.controller.current_path:
+            return
+        self.controller.apply_edit_session_field(field, text)
+
+    def _on_photo_meta(self, path: str) -> None:
+        if path and path == self.controller.current_path:
+            self._update_file_subtitle()
+
+    def _update_file_subtitle(self) -> None:
+        path = self.controller.current_path
+        if not path:
+            self.file_subtitle.setText("导入照片开始编辑")
+            return
+        meta = self.photo_list.photo_meta(path)
+        width = int(meta.get("width") or 0)
+        height = int(meta.get("height") or 0)
+        suffix = Path(path).suffix.lstrip(".").upper()
+        fmt = {"JPG": "JPEG", "TIF": "TIFF"}.get(suffix, suffix) or "图片"
+        if width and height:
+            self.file_subtitle.setText(f"原图 {width} × {height} · {fmt}")
+        else:
+            self.file_subtitle.setText(f"原图读取中 · {fmt}")
+
+    def _on_save_state(self, state: str) -> None:
+        text = {
+            "saving": "●  正在保存…",
+            "saved": "●  所有修改已保存",
+            "error": "●  设置保存失败",
+        }.get(state, "●  所有修改已保存")
+        self.saved_label.setText(text)
+        self.saved_label.setProperty("state", state)
+        self.saved_label.style().unpolish(self.saved_label)
+        self.saved_label.style().polish(self.saved_label)
+
+    def _go_section(self, name: str) -> None:
+        """顶栏导航与左栏工作空间联动，切到对应检查页签。"""
+        tab = {"photos": "Logo", "assets": "Logo", "batch": "导出", "templates": "自定义"}.get(name, "Logo")
+        nav = {"photos": self.nav_edit, "assets": self.nav_edit, "batch": self.nav_batch}.get(
+            name, self.nav_templates
+        )
+        nav.setChecked(True)
+        if name in ("photos", "assets", "batch"):
+            self.sidebar.set_active(name)
+        self.settings.show_tab(tab)
+        if name == "photos":
+            self.preview.fit_in_view()
+
+    def _refresh_recent_templates(self) -> None:
+        self.sidebar.set_recent_templates(
+            template_store.recent_templates(2, self.settings.templates_path())
+        )
+
+    def _apply_recent_template(self, template_id: str) -> None:
+        if self.settings.apply_template(template_id):
+            self.status_label.setText("已应用最近使用的模板。")
+        else:
+            self._refresh_recent_templates()
 
     def _on_statuses(self, mapping: object) -> None:
         if isinstance(mapping, dict):
@@ -324,6 +503,11 @@ class MainWindow(QMainWindow):
     def _on_history(self, can_undo: bool, can_redo: bool) -> None:
         self.act_undo.setEnabled(can_undo)
         self.act_redo.setEnabled(can_redo)
+        self.undo_button.setEnabled(can_undo)
+        self.redo_button.setEnabled(can_redo)
+
+    def _select_style(self, style: str) -> None:
+        self.settings.style_combo.setCurrentText(style)
 
     def _on_field_edit_requested(self, key: str) -> None:
         from photo_watermark_studio.core.renderer import FIELD_LABELS
@@ -350,6 +534,7 @@ class MainWindow(QMainWindow):
                 "has_scale": True,
                 "font_family": str(session.get("font", "默认")),
                 "font_bold": bool(session.get("bold", False)),
+                "font_italic": bool(session.get("italic", False)),
                 "font_opacity": float(session.get("opacity", 1.0)),
             }
         )
@@ -361,6 +546,8 @@ class MainWindow(QMainWindow):
             return
         if key in ("camera", "lens", "exif", "date", "gps"):
             self.controller.apply_edit_session_field(key, text, scale_value)
+            if key in ("camera", "lens", "exif"):
+                self._sync_photo_exif_panel()
 
     def _on_font_family_changed(self, key: str, name: str) -> None:
         if key in ("brand", "caption"):
@@ -376,6 +563,13 @@ class MainWindow(QMainWindow):
         if key in ("camera", "lens", "exif", "date", "gps"):
             self.controller.apply_edit_session_bold(key, bold)
 
+    def _on_font_italic_changed(self, key: str, italic: bool) -> None:
+        if key in ("brand", "caption"):
+            self.settings.set_field_italic(key, italic)
+            return
+        if key in ("camera", "lens", "exif", "date", "gps"):
+            self.controller.apply_edit_session_italic(key, italic)
+
     def _on_font_opacity_changed(self, key: str, opacity: float) -> None:
         if key in ("brand", "caption"):
             self.settings.set_field_opacity(key, opacity)
@@ -385,6 +579,7 @@ class MainWindow(QMainWindow):
 
     def _on_edit_session_cleared(self) -> None:
         self.preview.hide_field_editor()
+        self._sync_photo_exif_panel()
 
     def _on_export_running(self, running: bool) -> None:
         self.save_button.setEnabled(not running and bool(self.controller.files))
@@ -459,6 +654,20 @@ class MainWindow(QMainWindow):
             self._remember_browse(files[0])
             self.controller.add_paths(files)
 
+    def _reset_watermark_settings(self) -> None:
+        if not self.suppress_dialogs:
+            answer = QMessageBox.question(
+                self,
+                "重置水印设置",
+                "将恢复默认水印，导出目录和照片列表不变。",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        state = settings_store.reset_watermark_settings(self.settings.state())
+        self.settings.set_state(state)
+        self.controller.apply_settings(self.settings.state())
+        self._show_output_dir(str(self.settings.state()["output_dir"]))
+
     def _clear_photos(self) -> None:
         if not self.controller.files:
             return
@@ -508,8 +717,8 @@ class MainWindow(QMainWindow):
     def _about(self) -> None:
         QMessageBox.information(
             self,
-            "关于光影水印",
-            "光影水印 Photo Watermark Studio 2.0\n本地照片元数据水印工具。\n原图只读，结果另存。",
+            "关于停下时光",
+            "停下时光 · Studio\n本地照片元数据水印工具。\n原图只读，结果另存。",
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:

@@ -5,9 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageOps
 
-from photo_watermark_studio.core.renderer import render_watermark
+from photo_watermark_studio.core.metadata import PhotoMetadata, metadata_from_image, remember_photo_metadata
+from photo_watermark_studio.core.renderer import render_watermark_with_hits
 from photo_watermark_studio.core.settings_store import EXPORT_FORMAT_EXTS, EXPORT_FORMATS
 
 
@@ -71,60 +72,75 @@ def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
     return min(hi, max(lo, parsed))
 
 
-def _collect_source_metadata(
-    source: Path,
+def _exif_bytes_upright(src: Image.Image) -> bytes | None:
+    """复制 EXIF 并把方向标成 1。不改原图里的方向标签，像素校正仍由 transpose 完成。"""
+    try:
+        exif = src.getexif()
+        if not exif:
+            return None
+        payload = exif.tobytes()
+        if not payload:
+            return None
+        upright = Image.Exif()
+        upright.load(payload)
+        try:
+            upright[274] = 1
+        except Exception:
+            pass
+        fixed = upright.tobytes()
+        return fixed or None
+    except Exception:
+        return None
+
+
+def _metadata_from_open(
+    src: Image.Image,
     *,
     keep_exif: bool,
     keep_icc: bool,
 ) -> tuple[bytes | None, bytes | None]:
-    """从原图读取 EXIF / ICC；任一步失败则对应项为 None。"""
-    exif_bytes: bytes | None = None
+    """从已经打开的图片读取 EXIF / ICC；任一步失败则对应项为 None。"""
+    exif_bytes = _exif_bytes_upright(src) if keep_exif else None
     icc_bytes: bytes | None = None
-    if not keep_exif and not keep_icc:
-        return None, None
-    try:
-        with Image.open(source) as src:
-            if keep_exif:
-                try:
-                    exif = src.getexif()
-                    if exif:
-                        # 渲染前已做方向校正。
-                        try:
-                            exif[274] = 1
-                        except Exception:
-                            pass
-                        payload = exif.tobytes()
-                        if payload:
-                            exif_bytes = payload
-                except Exception:
-                    exif_bytes = None
-            if keep_icc:
-                try:
-                    profile = src.info.get("icc_profile")
-                    if isinstance(profile, (bytes, bytearray)) and profile:
-                        icc_bytes = bytes(profile)
-                except Exception:
-                    icc_bytes = None
-    except Exception:
-        return None, None
+    if keep_icc:
+        try:
+            profile = src.info.get("icc_profile")
+            if isinstance(profile, (bytes, bytearray)) and profile:
+                icc_bytes = bytes(profile)
+        except Exception:
+            icc_bytes = None
     return exif_bytes, icc_bytes
+
+
+def _load_export_source(
+    source: Path,
+    *,
+    keep_exif: bool,
+    keep_icc: bool,
+) -> tuple[Image.Image, PhotoMetadata, bytes | None, bytes | None]:
+    """一次打开原图：取出像素、水印用 EXIF 和要写回的 EXIF/ICC。"""
+    with Image.open(source) as src:
+        exif_bytes, icc_bytes = _metadata_from_open(src, keep_exif=keep_exif, keep_icc=keep_icc)
+        md = metadata_from_image(src)
+        base = ImageOps.exif_transpose(src).convert("RGB").copy()
+    return base, md, exif_bytes, icc_bytes
 
 
 def export_image(source: str | Path, output_dir: str | Path, options: dict[str, Any], quality: int) -> str:
     """按原图重新渲染并按所选格式保存。返回输出路径。"""
-    image = render_watermark(source, options)
-    policy = str(options.get("conflict_policy", "number") or "number")
-    fmt = normalize_export_format(options.get("export_format", "jpg"))
-    ext = export_extension(fmt)
-    out_path = allocate_output_path(source, output_dir, conflict_policy=policy, ext=ext)
-
     keep_exif = bool(options.get("keep_exif", True))
     keep_icc = bool(options.get("keep_icc", True))
-    exif_bytes, icc_bytes = _collect_source_metadata(
+    base, md, exif_bytes, icc_bytes = _load_export_source(
         Path(source),
         keep_exif=keep_exif,
         keep_icc=keep_icc,
     )
+    remember_photo_metadata(source, md)
+    image, _hits = render_watermark_with_hits(source, options, base_image=base, metadata=md)
+    policy = str(options.get("conflict_policy", "number") or "number")
+    fmt = normalize_export_format(options.get("export_format", "jpg"))
+    ext = export_extension(fmt)
+    out_path = allocate_output_path(source, output_dir, conflict_policy=policy, ext=ext)
 
     rgb = image.convert("RGB")
     kwargs: dict[str, Any] = {}
@@ -135,9 +151,11 @@ def export_image(source: str | Path, output_dir: str | Path, options: dict[str, 
 
     if fmt == "jpg":
         q = _clamp_int(quality, 1, 100, 95)
+        # optimize 会多做一次哈夫曼优化，大图明显变慢。需要更小文件时可打开 jpeg_optimize。
+        jpeg_optimize = bool(options.get("jpeg_optimize", False))
         save_kwargs = {
             "quality": q,
-            "optimize": True,
+            "optimize": jpeg_optimize,
             "progressive": True,
             **kwargs,
         }
@@ -145,7 +163,7 @@ def export_image(source: str | Path, output_dir: str | Path, options: dict[str, 
             rgb.save(out_path, "JPEG", **save_kwargs)
         except Exception:
             # 部分格式/Pillow 版本对 EXIF/ICC 组合敏感，降级为仅像素。
-            rgb.save(out_path, "JPEG", quality=q, optimize=True, progressive=True)
+            rgb.save(out_path, "JPEG", quality=q, optimize=jpeg_optimize, progressive=True)
     elif fmt == "png":
         level = _clamp_int(options.get("png_compress", 6), 0, 9, 6)
         save_kwargs = {"compress_level": level, **kwargs}

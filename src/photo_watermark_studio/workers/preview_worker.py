@@ -2,6 +2,8 @@
 """后台预览。先缩到长边上限再渲水印，供画布缩放查看。"""
 from __future__ import annotations
 
+import threading
+from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageOps
@@ -45,7 +47,27 @@ def preview_scale_for(size: tuple[int, int], max_edge: int = PREVIEW_MAX_EDGE) -
     return max_edge / float(longest)
 
 
-def load_preview_base(path: str, max_edge: int = PREVIEW_MAX_EDGE) -> Image.Image:
+# 只保留当前这一张预览底图。键是路径、mtime、大小和长边上限。
+_preview_cache_lock = threading.Lock()
+_preview_cache: tuple[tuple[str, int, int, int], Image.Image] | None = None
+
+
+def clear_preview_base_cache() -> None:
+    global _preview_cache
+    with _preview_cache_lock:
+        _preview_cache = None
+
+
+def _preview_cache_key(path: str, max_edge: int) -> tuple[str, int, int, int] | None:
+    try:
+        file_path = Path(path).resolve()
+        stat = file_path.stat()
+        return (str(file_path), int(stat.st_mtime_ns), int(stat.st_size), int(max_edge))
+    except OSError:
+        return None
+
+
+def _decode_preview_base(path: str, max_edge: int) -> Image.Image:
     """打开原图并缩到预览上限（EXIF 方向校正后）。"""
     with Image.open(path) as src:
         image = ImageOps.exif_transpose(src).convert("RGB")
@@ -55,6 +77,23 @@ def load_preview_base(path: str, max_edge: int = PREVIEW_MAX_EDGE) -> Image.Imag
             (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
             Image.Resampling.LANCZOS,
         )
+    return image
+
+
+def load_preview_base(path: str, max_edge: int = PREVIEW_MAX_EDGE) -> Image.Image:
+    """打开原图并缩到预览上限。同一文件未变化时复用已解码底图。"""
+    global _preview_cache
+    key = _preview_cache_key(path, max_edge)
+    if key is not None:
+        with _preview_cache_lock:
+            cached = _preview_cache
+            if cached is not None and cached[0] == key:
+                return cached[1].copy()
+    image = _decode_preview_base(path, max_edge)
+    if key is not None:
+        with _preview_cache_lock:
+            _preview_cache = (key, image)
+            return image.copy()
     return image
 
 
